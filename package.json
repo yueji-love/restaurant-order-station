@@ -7,6 +7,7 @@
     "dev": "concurrently -k \"node --watch server/index.js\" \"vite --host 0.0.0.0\"",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
+    "seed:demo": "node scripts/seed-demo.js",
     "server": "node server/index.js",
     "start": "node server/index.js"
   },

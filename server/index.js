@@ -1,15 +1,33 @@
 import express from 'express';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  SESSION_COOKIE,
+  SESSION_DURATION_MS,
+  createPasswordRecord,
+  createSessionCookie,
+  createSessionToken,
+  hashToken,
+  normalizeUsername,
+  readCookie,
+  verifyPassword,
+} from './auth.js';
+import { loadStateFromDatabase, saveStateToDatabase } from './database.js';
+import { DEFAULT_ADD_ONS, DEFAULT_DISHES } from './menu-data.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
-const dataDirectory = join(__dirname, 'data');
-const storePath = join(dataDirectory, 'store.json');
-const temporaryStorePath = `${storePath}.tmp`;
 const port = Number(process.env.PORT || 5175);
 const defaultAvailableNumbers = Array.from({ length: 36 }, (_, index) => index + 1);
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function createId(prefix) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
 
 function normalizeAvailableNumbers(value) {
   if (!Array.isArray(value)) return [...defaultAvailableNumbers];
@@ -18,45 +36,66 @@ function normalizeAvailableNumbers(value) {
   return numbers.length ? numbers : [...defaultAvailableNumbers];
 }
 
+function normalizeDishes(value) {
+  const source = Array.isArray(value) ? value : DEFAULT_DISHES;
+  return source
+    .filter((item) => item && typeof item.name === 'string' && item.name.trim())
+    .map((item, index) => ({
+      id: typeof item.id === 'string' && item.id ? item.id : `dish-imported-${index + 1}`,
+      group: typeof item.group === 'string' && item.group.trim() ? item.group.trim().slice(0, 30) : '未分类',
+      name: item.name.trim().slice(0, 60),
+      note: typeof item.note === 'string' ? item.note.trim().slice(0, 100) : '',
+      priceCents: Number.isInteger(item.priceCents) && item.priceCents >= 0 ? item.priceCents : 0,
+      active: item.active !== false,
+      createdAt: typeof item.createdAt === 'string' ? item.createdAt : nowIso(),
+      updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : nowIso(),
+    }));
+}
+
+function normalizeAddOns(value) {
+  const source = Array.isArray(value) ? value : DEFAULT_ADD_ONS;
+  return source
+    .filter((item) => item && typeof item.name === 'string' && item.name.trim())
+    .map((item, index) => ({
+      id: typeof item.id === 'string' && item.id ? item.id : `addon-imported-${index + 1}`,
+      name: item.name.trim().slice(0, 40),
+      priceCents: Number.isInteger(item.priceCents) && item.priceCents >= 0 ? item.priceCents : 0,
+      active: item.active !== false,
+      createdAt: typeof item.createdAt === 'string' ? item.createdAt : nowIso(),
+      updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : nowIso(),
+    }));
+}
+
 const initialState = {
-  queue: [
-    {
-      id: 'seed-12',
-      number: 12,
-      category: '双拼饭',
-      extras: ['加辣'],
-      status: 'waiting',
-      createdAt: new Date(Date.now() - 3 * 60_000).toISOString(),
-    },
-    {
-      id: 'seed-7',
-      number: 7,
-      category: '砂锅米线',
-      extras: ['不要蒜'],
-      status: 'making',
-      createdAt: new Date(Date.now() - 7 * 60_000).toISOString(),
-    },
-  ],
+  queue: [],
+  dishes: normalizeDishes(DEFAULT_DISHES),
+  addOns: normalizeAddOns(DEFAULT_ADD_ONS),
   settings: {
     sortMode: 'time',
     sound: true,
     availableNumbers: defaultAvailableNumbers,
   },
+  users: [],
+  sessions: [],
 };
 
-mkdirSync(dataDirectory, { recursive: true });
-
 function readState() {
-  if (!existsSync(storePath)) return structuredClone(initialState);
+  const stored = loadStateFromDatabase();
+  if (!stored) return structuredClone(initialState);
   try {
-    const stored = JSON.parse(readFileSync(storePath, 'utf8'));
     return {
       queue: Array.isArray(stored.queue) ? stored.queue : [],
+      dishes: normalizeDishes(stored.dishes),
+      addOns: normalizeAddOns(stored.addOns),
       settings: {
         sortMode: stored.settings?.sortMode === 'category' ? 'category' : 'time',
         sound: stored.settings?.sound !== false,
         availableNumbers: normalizeAvailableNumbers(stored.settings?.availableNumbers),
       },
+      users: Array.isArray(stored.users) ? stored.users : [],
+      sessions: Array.isArray(stored.sessions)
+        ? stored.sessions.filter((item) => Date.parse(item.expiresAt) > Date.now())
+        : [],
     };
   } catch (error) {
     console.error('无法读取数据文件，将使用初始状态。', error);
@@ -65,28 +104,175 @@ function readState() {
 }
 
 let state = readState();
-const clients = new Set();
+const clients = new Map();
+
+function publicState() {
+  return {
+    queue: state.queue,
+    dishes: state.dishes,
+    addOns: state.addOns,
+    settings: state.settings,
+  };
+}
 
 function persistState() {
-  writeFileSync(temporaryStorePath, JSON.stringify(state, null, 2), 'utf8');
-  renameSync(temporaryStorePath, storePath);
+  saveStateToDatabase(state);
 }
 
 function sendState(response) {
-  response.write(`event: state\ndata: ${JSON.stringify(state)}\n\n`);
+  response.write(`event: state\ndata: ${JSON.stringify(publicState())}\n\n`);
 }
 
 function broadcastState() {
   persistState();
-  clients.forEach(sendState);
+  clients.forEach((tokenHash, response) => {
+    if (!state.sessions.some((session) => session.tokenHash === tokenHash && Date.parse(session.expiresAt) > Date.now())) {
+      clients.delete(response);
+      response.end();
+      return;
+    }
+    sendState(response);
+  });
+}
+
+function sanitizeUser(user) {
+  return user ? { id: user.id, username: user.username, createdAt: user.createdAt } : null;
+}
+
+function currentSession(request) {
+  const token = readCookie(request, SESSION_COOKIE);
+  if (!token) return null;
+  const tokenHash = hashToken(token);
+  const session = state.sessions.find((item) => item.tokenHash === tokenHash && Date.parse(item.expiresAt) > Date.now());
+  if (!session) return null;
+  const user = state.users.find((item) => item.id === session.userId);
+  return user ? { session, user, tokenHash } : null;
+}
+
+function requireAuth(request, response, next) {
+  const auth = currentSession(request);
+  if (!auth) return response.status(401).json({ message: '请先登录。' });
+  request.authUser = auth.user;
+  request.authSession = auth.session;
+  return next();
+}
+
+function issueSession(request, response, user) {
+  const { token, tokenHash } = createSessionToken();
+  const createdAt = nowIso();
+  state.sessions.push({
+    id: createId('session'),
+    userId: user.id,
+    tokenHash,
+    createdAt,
+    expiresAt: new Date(Date.now() + SESSION_DURATION_MS).toISOString(),
+  });
+  response.setHeader('Set-Cookie', createSessionCookie(request, token, Math.floor(SESSION_DURATION_MS / 1000)));
+}
+
+function closeSessionClients(tokenHashToClose) {
+  clients.forEach((tokenHash, response) => {
+    if (tokenHash !== tokenHashToClose) return;
+    clients.delete(response);
+    response.end();
+  });
+}
+
+function parseDish(body, existing = {}) {
+  const group = body.group === undefined ? existing.group : body.group;
+  const name = body.name === undefined ? existing.name : body.name;
+  const note = body.note === undefined ? existing.note : body.note;
+  const priceCents = body.priceCents === undefined ? existing.priceCents : body.priceCents;
+  const active = body.active === undefined ? existing.active : body.active;
+  if (typeof group !== 'string' || !group.trim() || group.trim().length > 30) return null;
+  if (typeof name !== 'string' || !name.trim() || name.trim().length > 60) return null;
+  if (typeof note !== 'string' || note.trim().length > 100) return null;
+  if (!Number.isInteger(priceCents) || priceCents < 0 || priceCents > 1_000_000) return null;
+  if (typeof active !== 'boolean') return null;
+  return {
+    ...existing,
+    group: group.trim(),
+    name: name.trim(),
+    note: note.trim(),
+    priceCents,
+    active,
+    updatedAt: nowIso(),
+  };
+}
+
+function parseAddOn(body, existing = {}) {
+  const name = body.name === undefined ? existing.name : body.name;
+  const priceCents = body.priceCents === undefined ? existing.priceCents : body.priceCents;
+  const active = body.active === undefined ? existing.active : body.active;
+  if (typeof name !== 'string' || !name.trim() || name.trim().length > 40) return null;
+  if (!Number.isInteger(priceCents) || priceCents < 0 || priceCents > 1_000_000) return null;
+  if (typeof active !== 'boolean') return null;
+  return { ...existing, name: name.trim(), priceCents, active, updatedAt: nowIso() };
 }
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json({ limit: '32kb' }));
+app.use(express.json({ limit: '64kb' }));
+
+app.get('/api/auth/me', (request, response) => {
+  const auth = currentSession(request);
+  return response.json({ user: auth ? sanitizeUser(auth.user) : null });
+});
+
+app.post('/api/auth/register', async (request, response) => {
+  const username = normalizeUsername(request.body?.username);
+  const password = request.body?.password;
+  if (username.length < 3 || username.length > 32) {
+    return response.status(400).json({ message: '用户名需为 3 到 32 个字符。' });
+  }
+  if (typeof password !== 'string' || password.length < 8 || password.length > 128) {
+    return response.status(400).json({ message: '密码需为 8 到 128 个字符。' });
+  }
+  const usernameNormalized = username.toLocaleLowerCase('zh-CN');
+  if (state.users.some((item) => item.usernameNormalized === usernameNormalized)) {
+    return response.status(409).json({ message: '该用户名已注册。' });
+  }
+  const passwordRecord = await createPasswordRecord(password);
+  const user = {
+    id: createId('user'),
+    username,
+    usernameNormalized,
+    ...passwordRecord,
+    createdAt: nowIso(),
+  };
+  state.users.push(user);
+  issueSession(request, response, user);
+  persistState();
+  return response.status(201).json({ user: sanitizeUser(user) });
+});
+
+app.post('/api/auth/login', async (request, response) => {
+  const username = normalizeUsername(request.body?.username);
+  const password = request.body?.password;
+  const usernameNormalized = username.toLocaleLowerCase('zh-CN');
+  const user = state.users.find((item) => item.usernameNormalized === usernameNormalized);
+  if (!user || typeof password !== 'string' || !(await verifyPassword(password, user))) {
+    return response.status(401).json({ message: '用户名或密码不正确。' });
+  }
+  issueSession(request, response, user);
+  persistState();
+  return response.json({ user: sanitizeUser(user) });
+});
+
+app.post('/api/auth/logout', (request, response) => {
+  const token = readCookie(request, SESSION_COOKIE);
+  const tokenHashToClose = token ? hashToken(token) : '';
+  if (tokenHashToClose) state.sessions = state.sessions.filter((item) => item.tokenHash !== tokenHashToClose);
+  response.setHeader('Set-Cookie', createSessionCookie(request, '', 0));
+  persistState();
+  closeSessionClients(tokenHashToClose);
+  return response.json({ ok: true });
+});
+
+app.use('/api', requireAuth);
 
 app.get('/api/state', (_request, response) => {
-  response.json(state);
+  response.json(publicState());
 });
 
 app.get('/api/events', (request, response) => {
@@ -96,7 +282,7 @@ app.get('/api/events', (request, response) => {
     Connection: 'keep-alive',
   });
   response.flushHeaders();
-  clients.add(response);
+  clients.set(response, request.authSession.tokenHash);
   sendState(response);
 
   const heartbeat = setInterval(() => response.write(': keep-alive\n\n'), 25_000);
@@ -107,9 +293,9 @@ app.get('/api/events', (request, response) => {
 });
 
 app.post('/api/orders', (request, response) => {
-  const { number, category, extras = [] } = request.body ?? {};
-  if (!Number.isInteger(number) || number < 1 || number > 999 || typeof category !== 'string' || !category.trim()) {
-    return response.status(400).json({ message: '订单号码或品类无效。' });
+  const { number, dishId, addOnIds = [] } = request.body ?? {};
+  if (!Number.isInteger(number) || number < 1 || number > 999 || typeof dishId !== 'string') {
+    return response.status(400).json({ message: '订单号码或菜品无效。' });
   }
   if (!state.settings.availableNumbers.includes(number)) {
     return response.status(409).json({ message: `${number}号牌未启用，请在设置中添加后再下单。` });
@@ -117,16 +303,29 @@ app.post('/api/orders', (request, response) => {
   if (state.queue.some((item) => item.number === number)) {
     return response.status(409).json({ message: `${number}号正在使用中，请选择其他号码。` });
   }
+  const dish = state.dishes.find((item) => item.id === dishId && item.active);
+  if (!dish) return response.status(409).json({ message: '该菜品已停用或删除，请重新选择。' });
+  if (!Array.isArray(addOnIds) || addOnIds.some((item) => typeof item !== 'string')) {
+    return response.status(400).json({ message: '加料数据无效。' });
+  }
+  const uniqueAddOnIds = [...new Set(addOnIds)];
+  const selectedAddOns = uniqueAddOnIds.map((id) => state.addOns.find((item) => item.id === id && item.active));
+  if (selectedAddOns.some((item) => !item)) {
+    return response.status(409).json({ message: '部分加料已停用或删除，请重新选择。' });
+  }
 
   const order = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: createId('order'),
     number,
-    category: category.trim().slice(0, 40),
-    extras: Array.isArray(extras)
-      ? extras.filter((item) => typeof item === 'string').map((item) => item.slice(0, 30)).slice(0, 20)
-      : [],
+    dishId: dish.id,
+    category: dish.name,
+    dishGroup: dish.group,
+    priceCents: dish.priceCents,
+    addOns: selectedAddOns.map((item) => ({ id: item.id, name: item.name, priceCents: item.priceCents })),
+    extras: selectedAddOns.map((item) => item.name),
+    totalCents: dish.priceCents + selectedAddOns.reduce((sum, item) => sum + item.priceCents, 0),
     status: 'waiting',
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso(),
   };
 
   state.queue.push(order);
@@ -145,7 +344,7 @@ app.patch('/api/orders/batch', (request, response) => {
     state.queue = state.queue.map((item) => {
       if (item.category !== category || item.status !== 'waiting') return item;
       updated += 1;
-      return { ...item, status: 'making', startedAt: new Date().toISOString() };
+      return { ...item, status: 'making', startedAt: nowIso() };
     });
   } else if (action === 'complete') {
     state.queue = state.queue.filter((item) => {
@@ -167,13 +366,76 @@ app.patch('/api/orders/:id', (request, response) => {
 
   const action = request.body?.action;
   if (action === 'start') {
-    state.queue[orderIndex] = { ...state.queue[orderIndex], status: 'making', startedAt: new Date().toISOString() };
+    state.queue[orderIndex] = { ...state.queue[orderIndex], status: 'making', startedAt: nowIso() };
   } else if (action === 'complete') {
     state.queue.splice(orderIndex, 1);
   } else {
     return response.status(400).json({ message: '不支持的出餐操作。' });
   }
 
+  broadcastState();
+  return response.json({ ok: true });
+});
+
+app.post('/api/dishes', (request, response) => {
+  const dish = parseDish(request.body, { active: true });
+  if (!dish) return response.status(400).json({ message: '请检查菜品名称、分组和价格。' });
+  const duplicate = state.dishes.some((item) => item.group === dish.group && item.name === dish.name);
+  if (duplicate) return response.status(409).json({ message: '同一分组中已存在同名菜品。' });
+  const created = { ...dish, id: createId('dish'), createdAt: nowIso() };
+  state.dishes.push(created);
+  broadcastState();
+  return response.status(201).json(created);
+});
+
+app.patch('/api/dishes/:id', (request, response) => {
+  const index = state.dishes.findIndex((item) => item.id === request.params.id);
+  if (index === -1) return response.status(404).json({ message: '菜品不存在。' });
+  const dish = parseDish(request.body, state.dishes[index]);
+  if (!dish) return response.status(400).json({ message: '请检查菜品名称、分组和价格。' });
+  const duplicate = state.dishes.some((item, itemIndex) => itemIndex !== index && item.group === dish.group && item.name === dish.name);
+  if (duplicate) return response.status(409).json({ message: '同一分组中已存在同名菜品。' });
+  state.dishes[index] = dish;
+  broadcastState();
+  return response.json(dish);
+});
+
+app.delete('/api/dishes/:id', (request, response) => {
+  const index = state.dishes.findIndex((item) => item.id === request.params.id);
+  if (index === -1) return response.status(404).json({ message: '菜品不存在。' });
+  state.dishes.splice(index, 1);
+  broadcastState();
+  return response.json({ ok: true });
+});
+
+app.post('/api/add-ons', (request, response) => {
+  const addOn = parseAddOn(request.body, { active: true });
+  if (!addOn) return response.status(400).json({ message: '请检查加料名称和价格。' });
+  if (state.addOns.some((item) => item.name === addOn.name)) {
+    return response.status(409).json({ message: '已存在同名加料。' });
+  }
+  const created = { ...addOn, id: createId('addon'), createdAt: nowIso() };
+  state.addOns.push(created);
+  broadcastState();
+  return response.status(201).json(created);
+});
+
+app.patch('/api/add-ons/:id', (request, response) => {
+  const index = state.addOns.findIndex((item) => item.id === request.params.id);
+  if (index === -1) return response.status(404).json({ message: '加料不存在。' });
+  const addOn = parseAddOn(request.body, state.addOns[index]);
+  if (!addOn) return response.status(400).json({ message: '请检查加料名称和价格。' });
+  const duplicate = state.addOns.some((item, itemIndex) => itemIndex !== index && item.name === addOn.name);
+  if (duplicate) return response.status(409).json({ message: '已存在同名加料。' });
+  state.addOns[index] = addOn;
+  broadcastState();
+  return response.json(addOn);
+});
+
+app.delete('/api/add-ons/:id', (request, response) => {
+  const index = state.addOns.findIndex((item) => item.id === request.params.id);
+  if (index === -1) return response.status(404).json({ message: '加料不存在。' });
+  state.addOns.splice(index, 1);
   broadcastState();
   return response.json({ ok: true });
 });

@@ -2,9 +2,9 @@
 
 ## 架构
 
-- 保留现有 React + Express + JSON 文件持久化结构。
-- `state` 扩展为 `queue / settings / dishes / users / sessions`。
-- 对客户端只输出 `queue / settings / dishes`；认证数据始终保留在服务端。
+- 保留现有 React + Express 结构，持久层迁移为项目内 SQLite 数据库。
+- `state` 扩展为 `queue / settings / dishes / addOns / users / sessions`。
+- 对客户端只输出 `queue / settings / dishes / addOns`；认证数据始终保留在服务端。
 - 静态资源和认证接口公开，其余 `/api` 接口及 SSE 事件均经过会话校验。
 
 ## 认证设计
@@ -20,7 +20,13 @@
 ### Dish
 
 ```text
-id, name, note, priceCents, active, createdAt, updatedAt
+id, group, name, note, priceCents, active, createdAt, updatedAt
+```
+
+### AddOn
+
+```text
+id, name, priceCents, active, createdAt, updatedAt
 ```
 
 ### User
@@ -50,13 +56,16 @@ dishId, category（名称快照）, priceCents（价格快照）
 - `POST /api/dishes`
 - `PATCH /api/dishes/:id`
 - `DELETE /api/dishes/:id`
+- `POST /api/add-ons`
+- `PATCH /api/add-ons/:id`
+- `DELETE /api/add-ons/:id`
 - 现有订单、设置、状态和事件接口增加登录保护。
 
 ## 界面
 
 - 未登录：左右不对称的登录/注册界面，表单只保留用户名、密码和确认密码。
 - 顶栏：增加“菜品”入口及当前账号/退出按钮。
-- 菜品页：左侧录入/编辑表单，右侧高密度菜品清单；支持编辑、启停、删除。
+- 菜品页：左侧录入/编辑表单，右侧高密度菜品/加料清单；支持编辑、启停、删除。
 - 点单页：菜品选项完全来自 `dishes`，展示名称、说明与价格。
 - 设置页：删除顶部标题区，其余设置结构保持不变。
 

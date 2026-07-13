@@ -8,3 +8,6 @@ coverage/
 output/
 server/data/store.json
 server/data/store.json.tmp
+server/data/*.sqlite
+server/data/*.sqlite-shm
+server/data/*.sqlite-wal
