@@ -336,7 +336,6 @@ function App() {
       {view === 'kitchen' && (
         <KitchenView
           queue={queue}
-          settings={settings}
           onOrderAction={changeOrderStatus}
           onCategoryAction={changeCategoryStatus}
         />
@@ -679,12 +678,11 @@ function ActionBar({ step, number, category, extras, submitting, success, submit
   );
 }
 
-function KitchenView({ queue, settings, onOrderAction, onCategoryAction }) {
+function KitchenView({ queue, onOrderAction, onCategoryAction }) {
   const [pendingId, setPendingId] = useState(null);
   const [selectedCategory, setSelectedCategory] = useState('');
   const [batchAction, setBatchAction] = useState(null);
   const [now, setNow] = useState(Date.now());
-  const categoryMode = settings.sortMode === 'category';
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000);
@@ -702,13 +700,10 @@ function KitchenView({ queue, settings, onOrderAction, onCategoryAction }) {
     return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
   }, [queue]);
 
-  const activeCategory = categoryGroups.some((item) => item.name === selectedCategory) ? selectedCategory : categoryGroups[0]?.name ?? '';
+  const activeCategory = categoryGroups.some((item) => item.name === selectedCategory) ? selectedCategory : '';
   const activeGroup = categoryGroups.find((item) => item.name === activeCategory);
-  const orderedQueue = useMemo(() => [...queue].sort((a, b) => {
-    if (categoryMode) return a.category.localeCompare(b.category, 'zh-CN') || Date.parse(a.createdAt) - Date.parse(b.createdAt);
-    return Date.parse(a.createdAt) - Date.parse(b.createdAt);
-  }), [categoryMode, queue]);
-  const visibleQueue = categoryMode && activeCategory ? orderedQueue.filter((item) => item.category === activeCategory) : orderedQueue;
+  const orderedQueue = useMemo(() => [...queue].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)), [queue]);
+  const visibleQueue = activeCategory ? orderedQueue.filter((item) => item.category === activeCategory) : orderedQueue;
 
   const actOnOrder = async (item) => {
     setPendingId(item.id);
@@ -726,28 +721,31 @@ function KitchenView({ queue, settings, onOrderAction, onCategoryAction }) {
   return (
     <main className="secondary-page">
       <div className="page-heading kitchen-heading">
-        <h1>{categoryMode ? '按品类出餐' : '按下单顺序'}</h1>
+        <h1>按品类出餐</h1>
         <div className="order-count" aria-label={`${queue.length}单待处理`}><strong>{queue.length}</strong><span>单待处理</span></div>
       </div>
-      {categoryMode && categoryGroups.length > 0 && (
-        <section className="category-controls" aria-label="按品类筛选和批量出餐">
-          <div className="category-tabs" role="tablist" aria-label="品类">
-            {categoryGroups.map((item) => (
-              <button type="button" role="tab" aria-selected={item.name === activeCategory} className={item.name === activeCategory ? 'is-active' : ''} key={item.name} onClick={() => setSelectedCategory(item.name)}>
-                <span>{item.name}</span><strong>{item.count}</strong>
-              </button>
-            ))}
-          </div>
+      <section className="category-controls" aria-label="按品类筛选和批量出餐">
+        <div className="category-tabs" role="tablist" aria-label="品类">
+          <button type="button" role="tab" aria-selected={!activeCategory} className={!activeCategory ? 'is-active' : ''} onClick={() => setSelectedCategory('')}>
+            <span>全部</span><strong>{queue.length}</strong>
+          </button>
+          {categoryGroups.map((item) => (
+            <button type="button" role="tab" aria-selected={item.name === activeCategory} className={item.name === activeCategory ? 'is-active' : ''} key={item.name} onClick={() => setSelectedCategory(item.name)}>
+              <span>{item.name}</span><strong>{item.count}</strong>
+            </button>
+          ))}
+        </div>
+        {activeGroup && (
           <div className="category-batch-actions">
-            <button type="button" className="batch-start-button" disabled={!activeGroup?.waiting || batchAction !== null} onClick={() => actOnCategory('start')}>
-              {batchAction === 'start' ? '正在开始' : `一键开始制作 ${activeGroup?.waiting ?? 0}`}
+            <button type="button" className="batch-start-button" disabled={!activeGroup.waiting || batchAction !== null} onClick={() => actOnCategory('start')}>
+              {batchAction === 'start' ? '正在开始' : `一键开始制作 ${activeGroup.waiting}`}
             </button>
-            <button type="button" className="batch-complete-button" disabled={!activeGroup?.making || batchAction !== null} onClick={() => actOnCategory('complete')}>
-              {batchAction === 'complete' ? '正在出餐' : `一键出餐 ${activeGroup?.making ?? 0}`}
+            <button type="button" className="batch-complete-button" disabled={!activeGroup.making || batchAction !== null} onClick={() => actOnCategory('complete')}>
+              {batchAction === 'complete' ? '正在出餐' : `一键出餐 ${activeGroup.making}`}
             </button>
           </div>
-        </section>
-      )}
+        )}
+      </section>
       {visibleQueue.length ? (
         <div className="queue-grid">
           {visibleQueue.map((item) => (
@@ -1180,13 +1178,6 @@ function SettingsView({ settings, status, onChange }) {
 
   return (
     <main className="secondary-page settings-page settings-page--direct">
-      <section className="settings-group" aria-labelledby="queue-setting">
-        <div><h2 id="queue-setting">出餐排序</h2><p>决定出餐页面默认如何排列订单。</p></div>
-        <div className="segmented-control" role="radiogroup" aria-label="出餐排序">
-          <button type="button" role="radio" disabled={status === 'saving'} aria-checked={settings.sortMode === 'time'} className={settings.sortMode === 'time' ? 'is-active' : ''} onClick={() => onChange({ sortMode: 'time' })}>下单顺序</button>
-          <button type="button" role="radio" disabled={status === 'saving'} aria-checked={settings.sortMode === 'category'} className={settings.sortMode === 'category' ? 'is-active' : ''} onClick={() => onChange({ sortMode: 'category' })}>按品类</button>
-        </div>
-      </section>
       <section className="settings-group" aria-labelledby="sound-setting">
         <div><h2 id="sound-setting">三全音提示</h2><p>有新订单时播放三段短音。</p></div>
         <button type="button" disabled={status === 'saving'} className={`switch ${settings.sound ? 'is-on' : ''}`} role="switch" aria-checked={settings.sound} onClick={() => onChange({ sound: !settings.sound })}>
