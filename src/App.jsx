@@ -720,10 +720,6 @@ function KitchenView({ queue, onOrderAction, onCategoryAction }) {
 
   return (
     <main className="secondary-page">
-      <div className="page-heading kitchen-heading">
-        <h1>按品类出餐</h1>
-        <div className="order-count" aria-label={`${queue.length}单待处理`}><strong>{queue.length}</strong><span>单待处理</span></div>
-      </div>
       <section className="category-controls" aria-label="按品类筛选和批量出餐">
         <div className="category-tabs" role="tablist" aria-label="品类">
           <button type="button" role="tab" aria-selected={!activeCategory} className={!activeCategory ? 'is-active' : ''} onClick={() => setSelectedCategory('')}>
