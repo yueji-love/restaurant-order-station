@@ -9,6 +9,14 @@ const dataDirectory = join(__dirname, 'data');
 const storePath = join(dataDirectory, 'store.json');
 const temporaryStorePath = `${storePath}.tmp`;
 const port = Number(process.env.PORT || 5175);
+const defaultAvailableNumbers = Array.from({ length: 36 }, (_, index) => index + 1);
+
+function normalizeAvailableNumbers(value) {
+  if (!Array.isArray(value)) return [...defaultAvailableNumbers];
+  const numbers = [...new Set(value.filter((item) => Number.isInteger(item) && item >= 1 && item <= 999))]
+    .sort((a, b) => a - b);
+  return numbers.length ? numbers : [...defaultAvailableNumbers];
+}
 
 const initialState = {
   queue: [
@@ -32,6 +40,7 @@ const initialState = {
   settings: {
     sortMode: 'time',
     sound: true,
+    availableNumbers: defaultAvailableNumbers,
   },
 };
 
@@ -46,6 +55,7 @@ function readState() {
       settings: {
         sortMode: stored.settings?.sortMode === 'category' ? 'category' : 'time',
         sound: stored.settings?.sound !== false,
+        availableNumbers: normalizeAvailableNumbers(stored.settings?.availableNumbers),
       },
     };
   } catch (error) {
@@ -100,6 +110,9 @@ app.post('/api/orders', (request, response) => {
   const { number, category, extras = [] } = request.body ?? {};
   if (!Number.isInteger(number) || number < 1 || number > 999 || typeof category !== 'string' || !category.trim()) {
     return response.status(400).json({ message: '订单号码或品类无效。' });
+  }
+  if (!state.settings.availableNumbers.includes(number)) {
+    return response.status(409).json({ message: `${number}号牌未启用，请在设置中添加后再下单。` });
   }
   if (state.queue.some((item) => item.number === number)) {
     return response.status(409).json({ message: `${number}号正在使用中，请选择其他号码。` });
@@ -174,6 +187,15 @@ app.patch('/api/settings', (request, response) => {
     nextSettings.sortMode = request.body.sortMode;
   }
   if (request.body?.sound !== undefined) nextSettings.sound = Boolean(request.body.sound);
+  if (request.body?.availableNumbers !== undefined) {
+    const availableNumbers = request.body.availableNumbers;
+    const hasInvalidNumber = !Array.isArray(availableNumbers)
+      || availableNumbers.some((item) => !Number.isInteger(item) || item < 1 || item > 999);
+    if (hasInvalidNumber || availableNumbers.length === 0) {
+      return response.status(400).json({ message: '号牌清单无效，请至少保留一个 1 到 999 之间的号码。' });
+    }
+    nextSettings.availableNumbers = [...new Set(availableNumbers)].sort((a, b) => a - b);
+  }
 
   state.settings = nextSettings;
   broadcastState();
