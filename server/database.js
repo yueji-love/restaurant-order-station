@@ -1,12 +1,15 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const dataDirectory = join(__dirname, 'data');
+const configuredDatabasePath = process.env.DATABASE_PATH?.trim();
+export const databasePath = configuredDatabasePath
+  ? resolve(configuredDatabasePath)
+  : join(__dirname, 'data', 'restaurant.sqlite');
+const dataDirectory = dirname(databasePath);
 const legacyStorePath = join(dataDirectory, 'store.json');
-export const databasePath = join(dataDirectory, 'restaurant.sqlite');
 
 mkdirSync(dataDirectory, { recursive: true });
 
@@ -36,6 +39,13 @@ database.exec(`
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS workspaces (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    data_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
   ) STRICT;
 
   CREATE TABLE IF NOT EXISTS dishes (
@@ -93,59 +103,98 @@ function parseJson(value, fallback) {
   }
 }
 
-export function loadStateFromDatabase() {
+function loadUsers() {
+  return database.prepare('SELECT * FROM users ORDER BY created_at, rowid').all().map((row) => ({
+    id: row.id,
+    username: row.username,
+    usernameNormalized: row.username_normalized,
+    passwordHash: row.password_hash,
+    passwordSalt: row.password_salt,
+    createdAt: row.created_at,
+    demo: Boolean(row.is_demo),
+  }));
+}
+
+function loadSessions() {
+  return database.prepare('SELECT * FROM sessions ORDER BY created_at, rowid').all().map((row) => ({
+    tokenHash: row.token_hash,
+    userId: row.user_id,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+  }));
+}
+
+function loadLegacyWorkspace() {
   const settingsRow = database.prepare('SELECT data_json FROM settings WHERE id = 1').get();
-  const hasData = settingsRow || database.prepare('SELECT 1 AS found FROM users LIMIT 1').get()
-    || database.prepare('SELECT 1 AS found FROM dishes LIMIT 1').get();
-  if (!hasData) return null;
+  const dishes = database.prepare('SELECT * FROM dishes ORDER BY sort_order, created_at, rowid').all().map((row) => ({
+    id: row.id,
+    group: row.group_name,
+    name: row.name,
+    note: row.note,
+    priceCents: row.price_cents,
+    active: Boolean(row.active),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    allowedAddOnIds: row.allowed_add_on_ids_json === null
+      ? undefined
+      : parseJson(row.allowed_add_on_ids_json, []),
+  }));
+  const addOns = database.prepare('SELECT * FROM add_ons ORDER BY sort_order, created_at, rowid').all().map((row) => ({
+    id: row.id,
+    name: row.name,
+    priceCents: row.price_cents,
+    active: Boolean(row.active),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+  const queue = database.prepare('SELECT data_json FROM orders ORDER BY rowid').all()
+    .map((row) => parseJson(row.data_json, null)).filter(Boolean);
+  const history = database.prepare('SELECT data_json FROM order_history ORDER BY completed_at DESC, rowid DESC').all()
+    .map((row) => parseJson(row.data_json, null)).filter(Boolean);
 
   return {
-    queue: database.prepare('SELECT data_json FROM orders ORDER BY rowid').all()
-      .map((row) => parseJson(row.data_json, null)).filter(Boolean),
-    dishes: database.prepare('SELECT * FROM dishes ORDER BY sort_order, created_at, rowid').all().map((row) => ({
-      id: row.id,
-      group: row.group_name,
-      name: row.name,
-      note: row.note,
-      priceCents: row.price_cents,
-      active: Boolean(row.active),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      allowedAddOnIds: row.allowed_add_on_ids_json === null
-        ? undefined
-        : parseJson(row.allowed_add_on_ids_json, []),
-    })),
-    addOns: database.prepare('SELECT * FROM add_ons ORDER BY sort_order, created_at, rowid').all().map((row) => ({
-      id: row.id,
-      name: row.name,
-      priceCents: row.price_cents,
-      active: Boolean(row.active),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    })),
-    settings: settingsRow ? parseJson(settingsRow.data_json, {}) : {},
-    users: database.prepare('SELECT * FROM users ORDER BY created_at, rowid').all().map((row) => ({
-      id: row.id,
-      username: row.username,
-      usernameNormalized: row.username_normalized,
-      passwordHash: row.password_hash,
-      passwordSalt: row.password_salt,
-      createdAt: row.created_at,
-      demo: Boolean(row.is_demo),
-    })),
-    sessions: database.prepare('SELECT * FROM sessions ORDER BY created_at, rowid').all().map((row) => ({
-      tokenHash: row.token_hash,
-      userId: row.user_id,
-      createdAt: row.created_at,
-      expiresAt: row.expires_at,
-    })),
-    history: database.prepare('SELECT data_json FROM order_history ORDER BY completed_at DESC, rowid DESC').all()
-      .map((row) => parseJson(row.data_json, null)).filter(Boolean),
+    hasData: Boolean(settingsRow || dishes.length || addOns.length || queue.length || history.length),
+    workspace: {
+      queue,
+      dishes,
+      addOns,
+      settings: settingsRow ? parseJson(settingsRow.data_json, {}) : {},
+      history,
+    },
   };
 }
 
+function selectLegacyOwner(users) {
+  return users.find((user) => user.usernameNormalized === 'yue') ?? users[0] ?? null;
+}
+
+function loadWorkspaces(users) {
+  const rows = database.prepare('SELECT user_id, data_json FROM workspaces ORDER BY created_at, rowid').all();
+  if (rows.length) {
+    return Object.fromEntries(rows.map((row) => [row.user_id, parseJson(row.data_json, {})]));
+  }
+
+  const legacy = loadLegacyWorkspace();
+  const owner = selectLegacyOwner(users);
+  if (!legacy.hasData || !owner) return {};
+
+  const timestamp = new Date().toISOString();
+  database.prepare(`
+    INSERT INTO workspaces (user_id, data_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?)
+  `).run(owner.id, JSON.stringify(legacy.workspace), timestamp, timestamp);
+  return { [owner.id]: legacy.workspace };
+}
+
+export function loadStateFromDatabase() {
+  const users = loadUsers();
+  const sessions = loadSessions();
+  const workspaces = loadWorkspaces(users);
+  if (!users.length && !Object.keys(workspaces).length) return null;
+  return { users, sessions, workspaces };
+}
+
 export function saveStateToDatabase(state) {
-  const insertSettings = database.prepare('INSERT INTO settings (id, data_json) VALUES (1, ?)');
   const insertUser = database.prepare(`
     INSERT INTO users (id, username, username_normalized, password_hash, password_salt, created_at, is_demo)
     VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -153,38 +202,41 @@ export function saveStateToDatabase(state) {
   const insertSession = database.prepare(`
     INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)
   `);
-  const insertDish = database.prepare(`
-    INSERT INTO dishes (id, group_name, name, note, price_cents, active, sort_order, created_at, updated_at, allowed_add_on_ids_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  const insertWorkspace = database.prepare(`
+    INSERT INTO workspaces (user_id, data_json, created_at, updated_at) VALUES (?, ?, ?, ?)
   `);
-  const insertAddOn = database.prepare(`
-    INSERT INTO add_ons (id, name, price_cents, active, sort_order, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-  const insertOrder = database.prepare('INSERT INTO orders (id, data_json) VALUES (?, ?)');
-  const insertHistory = database.prepare('INSERT INTO order_history (id, completed_at, data_json) VALUES (?, ?, ?)');
+  const existingCreatedAt = new Map(
+    database.prepare('SELECT user_id, created_at FROM workspaces').all()
+      .map((row) => [row.user_id, row.created_at]),
+  );
+  const timestamp = new Date().toISOString();
 
   database.exec('BEGIN IMMEDIATE');
   try {
-    database.exec('DELETE FROM sessions; DELETE FROM users; DELETE FROM dishes; DELETE FROM add_ons; DELETE FROM orders; DELETE FROM order_history; DELETE FROM settings;');
-    insertSettings.run(JSON.stringify(state.settings ?? {}));
+    database.exec('DELETE FROM sessions; DELETE FROM workspaces; DELETE FROM users;');
     for (const user of state.users ?? []) {
-      insertUser.run(user.id, user.username, user.usernameNormalized, user.passwordHash, user.passwordSalt, user.createdAt, user.demo ? 1 : 0);
+      insertUser.run(
+        user.id,
+        user.username,
+        user.usernameNormalized,
+        user.passwordHash,
+        user.passwordSalt,
+        user.createdAt,
+        user.demo ? 1 : 0,
+      );
     }
     for (const session of state.sessions ?? []) {
       insertSession.run(session.tokenHash, session.userId, session.createdAt, session.expiresAt);
     }
-    for (const [index, dish] of (state.dishes ?? []).entries()) {
-      insertDish.run(dish.id, dish.group, dish.name, dish.note ?? '', dish.priceCents, dish.active ? 1 : 0, index, dish.createdAt, dish.updatedAt, JSON.stringify(dish.allowedAddOnIds ?? []));
-    }
-    for (const [index, addOn] of (state.addOns ?? []).entries()) {
-      insertAddOn.run(addOn.id, addOn.name, addOn.priceCents, addOn.active ? 1 : 0, index, addOn.createdAt, addOn.updatedAt);
-    }
-    for (const order of state.queue ?? []) {
-      insertOrder.run(order.id, JSON.stringify(order));
-    }
-    for (const order of state.history ?? []) {
-      insertHistory.run(order.id, order.completedAt, JSON.stringify(order));
+    for (const user of state.users ?? []) {
+      const workspace = state.workspaces?.[user.id];
+      if (!workspace) continue;
+      insertWorkspace.run(
+        user.id,
+        JSON.stringify(workspace),
+        existingCreatedAt.get(user.id) ?? timestamp,
+        timestamp,
+      );
     }
     database.exec('COMMIT');
   } catch (error) {
@@ -195,5 +247,21 @@ export function saveStateToDatabase(state) {
 
 if (!loadStateFromDatabase() && existsSync(legacyStorePath)) {
   const legacyState = parseJson(readFileSync(legacyStorePath, 'utf8'), null);
-  if (legacyState) saveStateToDatabase(legacyState);
+  const users = Array.isArray(legacyState?.users) ? legacyState.users : [];
+  const owner = selectLegacyOwner(users);
+  if (legacyState && owner) {
+    saveStateToDatabase({
+      users,
+      sessions: Array.isArray(legacyState.sessions) ? legacyState.sessions : [],
+      workspaces: {
+        [owner.id]: {
+          queue: Array.isArray(legacyState.queue) ? legacyState.queue : [],
+          dishes: Array.isArray(legacyState.dishes) ? legacyState.dishes : [],
+          addOns: Array.isArray(legacyState.addOns) ? legacyState.addOns : [],
+          settings: legacyState.settings ?? {},
+          history: Array.isArray(legacyState.history) ? legacyState.history : [],
+        },
+      },
+    });
+  }
 }

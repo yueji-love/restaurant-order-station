@@ -15,7 +15,6 @@ import {
 } from './auth.js';
 import { buildAnalytics } from './analytics.js';
 import { loadStateFromDatabase, saveStateToDatabase } from './database.js';
-import { DEFAULT_ADD_ONS, DEFAULT_DISHES } from './menu-data.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
@@ -37,9 +36,8 @@ function normalizeAvailableNumbers(value) {
   return numbers.length ? numbers : [...defaultAvailableNumbers];
 }
 
-function normalizeDishes(value) {
-  const source = Array.isArray(value) ? value : DEFAULT_DISHES;
-  const defaultAddOnIds = DEFAULT_ADD_ONS.map((item) => item.id);
+function normalizeDishes(value, defaultAddOnIds = []) {
+  const source = Array.isArray(value) ? value : [];
   return source
     .filter((item) => item && typeof item.name === 'string' && item.name.trim())
     .map((item, index) => ({
@@ -58,7 +56,7 @@ function normalizeDishes(value) {
 }
 
 function normalizeAddOns(value) {
-  const source = Array.isArray(value) ? value : DEFAULT_ADD_ONS;
+  const source = Array.isArray(value) ? value : [];
   return source
     .filter((item) => item && typeof item.name === 'string' && item.name.trim())
     .map((item, index) => ({
@@ -71,41 +69,44 @@ function normalizeAddOns(value) {
     }));
 }
 
+function createWorkspace(source = {}) {
+  const addOns = normalizeAddOns(source.addOns);
+  return {
+    queue: Array.isArray(source.queue) ? source.queue : [],
+    dishes: normalizeDishes(source.dishes, addOns.map((item) => item.id)),
+    addOns,
+    settings: {
+      sortMode: source.settings?.sortMode === 'category' ? 'category' : 'time',
+      sound: source.settings?.sound !== false,
+      availableNumbers: normalizeAvailableNumbers(source.settings?.availableNumbers),
+    },
+    history: Array.isArray(source.history) ? source.history : [],
+  };
+}
+
 const initialState = {
-  queue: [],
-  dishes: normalizeDishes(DEFAULT_DISHES),
-  addOns: normalizeAddOns(DEFAULT_ADD_ONS),
-  settings: {
-    sortMode: 'time',
-    sound: true,
-    availableNumbers: defaultAvailableNumbers,
-  },
   users: [],
   sessions: [],
-  history: [],
+  workspaces: {},
 };
 
 function readState() {
   const stored = loadStateFromDatabase();
   if (!stored) return structuredClone(initialState);
   try {
+    const users = Array.isArray(stored.users) ? stored.users : [];
     return {
-      queue: Array.isArray(stored.queue) ? stored.queue : [],
-      dishes: normalizeDishes(stored.dishes),
-      addOns: normalizeAddOns(stored.addOns),
-      settings: {
-        sortMode: stored.settings?.sortMode === 'category' ? 'category' : 'time',
-        sound: stored.settings?.sound !== false,
-        availableNumbers: normalizeAvailableNumbers(stored.settings?.availableNumbers),
-      },
-      users: Array.isArray(stored.users) ? stored.users : [],
+      users,
       sessions: Array.isArray(stored.sessions)
         ? stored.sessions.filter((item) => Date.parse(item.expiresAt) > Date.now())
         : [],
-      history: Array.isArray(stored.history) ? stored.history : [],
+      workspaces: Object.fromEntries(users.map((user) => [
+        user.id,
+        createWorkspace(stored.workspaces?.[user.id]),
+      ])),
     };
   } catch (error) {
-    console.error('无法读取数据文件，将使用初始状态。', error);
+    console.error('无法读取数据库，将使用初始状态。', error);
     return structuredClone(initialState);
   }
 }
@@ -113,12 +114,17 @@ function readState() {
 let state = readState();
 const clients = new Map();
 
-function publicState() {
+function workspaceForUser(userId) {
+  if (!state.workspaces[userId]) state.workspaces[userId] = createWorkspace();
+  return state.workspaces[userId];
+}
+
+function publicState(workspace) {
   return {
-    queue: state.queue,
-    dishes: state.dishes,
-    addOns: state.addOns,
-    settings: state.settings,
+    queue: workspace.queue,
+    dishes: workspace.dishes,
+    addOns: workspace.addOns,
+    settings: workspace.settings,
   };
 }
 
@@ -126,19 +132,22 @@ function persistState() {
   saveStateToDatabase(state);
 }
 
-function sendState(response) {
-  response.write(`event: state\ndata: ${JSON.stringify(publicState())}\n\n`);
+function sendState(response, userId) {
+  response.write(`event: state\ndata: ${JSON.stringify(publicState(workspaceForUser(userId)))}\n\n`);
 }
 
-function broadcastState() {
+function broadcastState(userId) {
   persistState();
-  clients.forEach((tokenHash, response) => {
-    if (!state.sessions.some((session) => session.tokenHash === tokenHash && Date.parse(session.expiresAt) > Date.now())) {
+  clients.forEach((client, response) => {
+    const sessionIsValid = state.sessions.some((session) => (
+      session.tokenHash === client.tokenHash && Date.parse(session.expiresAt) > Date.now()
+    ));
+    if (!sessionIsValid) {
       clients.delete(response);
       response.end();
       return;
     }
-    sendState(response);
+    if (client.userId === userId) sendState(response, userId);
   });
 }
 
@@ -161,6 +170,7 @@ function requireAuth(request, response, next) {
   if (!auth) return response.status(401).json({ message: '请先登录。' });
   request.authUser = auth.user;
   request.authSession = auth.session;
+  request.workspace = workspaceForUser(auth.user.id);
   return next();
 }
 
@@ -178,20 +188,20 @@ function issueSession(request, response, user) {
 }
 
 function closeSessionClients(tokenHashToClose) {
-  clients.forEach((tokenHash, response) => {
-    if (tokenHash !== tokenHashToClose) return;
+  clients.forEach((client, response) => {
+    if (client.tokenHash !== tokenHashToClose) return;
     clients.delete(response);
     response.end();
   });
 }
 
-function archiveOrder(order) {
+function archiveOrder(workspace, order) {
   const completedOrder = { ...order, status: 'completed', completedAt: nowIso() };
-  state.history.unshift(completedOrder);
+  workspace.history.unshift(completedOrder);
   return completedOrder;
 }
 
-function parseDish(body, existing = {}) {
+function parseDish(workspace, body, existing = {}) {
   const group = body.group === undefined ? existing.group : body.group;
   const name = body.name === undefined ? existing.name : body.name;
   const note = body.note === undefined ? existing.note : body.note;
@@ -205,7 +215,7 @@ function parseDish(body, existing = {}) {
   if (typeof active !== 'boolean') return null;
   if (!Array.isArray(allowedAddOnIds) || allowedAddOnIds.some((id) => typeof id !== 'string')) return null;
   const uniqueAddOnIds = [...new Set(allowedAddOnIds)];
-  if (uniqueAddOnIds.some((id) => !state.addOns.some((item) => item.id === id))) return null;
+  if (uniqueAddOnIds.some((id) => !workspace.addOns.some((item) => item.id === id))) return null;
   return {
     ...existing,
     group: group.trim(),
@@ -267,6 +277,7 @@ app.post('/api/auth/register', async (request, response) => {
     createdAt: nowIso(),
   };
   state.users.push(user);
+  state.workspaces[user.id] = createWorkspace();
   issueSession(request, response, user);
   persistState();
   return response.status(201).json({ user: sanitizeUser(user) });
@@ -280,6 +291,7 @@ app.post('/api/auth/login', async (request, response) => {
   if (!user || typeof password !== 'string' || !(await verifyPassword(password, user))) {
     return response.status(401).json({ message: '用户名或密码不正确。' });
   }
+  workspaceForUser(user.id);
   issueSession(request, response, user);
   persistState();
   return response.json({ user: sanitizeUser(user) });
@@ -297,8 +309,8 @@ app.post('/api/auth/logout', (request, response) => {
 
 app.use('/api', requireAuth);
 
-app.get('/api/state', (_request, response) => {
-  response.json(publicState());
+app.get('/api/state', (request, response) => {
+  response.json(publicState(request.workspace));
 });
 
 app.get('/api/events', (request, response) => {
@@ -308,8 +320,11 @@ app.get('/api/events', (request, response) => {
     Connection: 'keep-alive',
   });
   response.flushHeaders();
-  clients.set(response, request.authSession.tokenHash);
-  sendState(response);
+  clients.set(response, {
+    tokenHash: request.authSession.tokenHash,
+    userId: request.authUser.id,
+  });
+  sendState(response, request.authUser.id);
 
   const heartbeat = setInterval(() => response.write(': keep-alive\n\n'), 25_000);
   request.on('close', () => {
@@ -324,27 +339,28 @@ app.get('/api/analytics', (request, response) => {
   if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) {
     return response.status(400).json({ message: '请选择有效的统计时间范围。' });
   }
-  return response.json(buildAnalytics(state.history, from, to));
+  return response.json(buildAnalytics(request.workspace.history, from, to));
 });
 
 app.post('/api/orders', (request, response) => {
+  const workspace = request.workspace;
   const { number, dishId, addOnIds = [] } = request.body ?? {};
   if (!Number.isInteger(number) || number < 1 || number > 999 || typeof dishId !== 'string') {
     return response.status(400).json({ message: '订单号码或菜品无效。' });
   }
-  if (!state.settings.availableNumbers.includes(number)) {
+  if (!workspace.settings.availableNumbers.includes(number)) {
     return response.status(409).json({ message: `${number}号牌未启用，请在设置中添加后再下单。` });
   }
-  if (state.queue.some((item) => item.number === number)) {
+  if (workspace.queue.some((item) => item.number === number)) {
     return response.status(409).json({ message: `${number}号正在使用中，请选择其他号码。` });
   }
-  const dish = state.dishes.find((item) => item.id === dishId && item.active);
+  const dish = workspace.dishes.find((item) => item.id === dishId && item.active);
   if (!dish) return response.status(409).json({ message: '该菜品已停用或删除，请重新选择。' });
   if (!Array.isArray(addOnIds) || addOnIds.some((item) => typeof item !== 'string')) {
     return response.status(400).json({ message: '加料数据无效。' });
   }
   const uniqueAddOnIds = [...new Set(addOnIds)];
-  const selectedAddOns = uniqueAddOnIds.map((id) => state.addOns.find((item) => item.id === id && item.active));
+  const selectedAddOns = uniqueAddOnIds.map((id) => workspace.addOns.find((item) => item.id === id && item.active));
   if (selectedAddOns.some((item) => !item)) {
     return response.status(409).json({ message: '部分加料已停用或删除，请重新选择。' });
   }
@@ -366,12 +382,13 @@ app.post('/api/orders', (request, response) => {
     createdAt: nowIso(),
   };
 
-  state.queue.push(order);
-  broadcastState();
+  workspace.queue.push(order);
+  broadcastState(request.authUser.id);
   return response.status(201).json(order);
 });
 
 app.patch('/api/orders/batch', (request, response) => {
+  const workspace = request.workspace;
   const { category, action } = request.body ?? {};
   if (typeof category !== 'string' || !category.trim()) {
     return response.status(400).json({ message: '请选择要批量处理的品类。' });
@@ -379,17 +396,17 @@ app.patch('/api/orders/batch', (request, response) => {
 
   let updated = 0;
   if (action === 'start') {
-    state.queue = state.queue.map((item) => {
+    workspace.queue = workspace.queue.map((item) => {
       if (item.category !== category || item.status !== 'waiting') return item;
       updated += 1;
       return { ...item, status: 'making', startedAt: nowIso() };
     });
   } else if (action === 'complete') {
-    state.queue = state.queue.filter((item) => {
+    workspace.queue = workspace.queue.filter((item) => {
       const shouldComplete = item.category === category && item.status === 'making';
       if (shouldComplete) {
         updated += 1;
-        archiveOrder(item);
+        archiveOrder(workspace, item);
       }
       return !shouldComplete;
     });
@@ -397,114 +414,124 @@ app.patch('/api/orders/batch', (request, response) => {
     return response.status(400).json({ message: '不支持的批量出餐操作。' });
   }
 
-  if (updated > 0) broadcastState();
+  if (updated > 0) broadcastState(request.authUser.id);
   return response.json({ updated });
 });
 
 app.patch('/api/orders/:id', (request, response) => {
-  const orderIndex = state.queue.findIndex((item) => item.id === request.params.id);
+  const workspace = request.workspace;
+  const orderIndex = workspace.queue.findIndex((item) => item.id === request.params.id);
   if (orderIndex === -1) return response.status(404).json({ message: '订单不存在或已完成。' });
 
   const action = request.body?.action;
   if (action === 'start') {
-    state.queue[orderIndex] = { ...state.queue[orderIndex], status: 'making', startedAt: nowIso() };
+    workspace.queue[orderIndex] = { ...workspace.queue[orderIndex], status: 'making', startedAt: nowIso() };
   } else if (action === 'complete') {
-    const [completedOrder] = state.queue.splice(orderIndex, 1);
-    archiveOrder(completedOrder);
+    const [completedOrder] = workspace.queue.splice(orderIndex, 1);
+    archiveOrder(workspace, completedOrder);
   } else {
     return response.status(400).json({ message: '不支持的出餐操作。' });
   }
 
-  broadcastState();
+  broadcastState(request.authUser.id);
   return response.json({ ok: true });
 });
 
 app.post('/api/dishes', (request, response) => {
-  const dish = parseDish(request.body, { active: true });
+  const workspace = request.workspace;
+  const dish = parseDish(workspace, request.body, { active: true });
   if (!dish) return response.status(400).json({ message: '请检查菜品名称、分组和价格。' });
-  const duplicate = state.dishes.some((item) => item.group === dish.group && item.name === dish.name);
+  const duplicate = workspace.dishes.some((item) => item.group === dish.group && item.name === dish.name);
   if (duplicate) return response.status(409).json({ message: '同一分组中已存在同名菜品。' });
   const created = { ...dish, id: createId('dish'), createdAt: nowIso() };
-  state.dishes.push(created);
-  broadcastState();
+  workspace.dishes.push(created);
+  broadcastState(request.authUser.id);
   return response.status(201).json(created);
 });
 
 app.put('/api/dishes/order', (request, response) => {
-  const reordered = reorderItems(state.dishes, request.body?.ids);
+  const workspace = request.workspace;
+  const reordered = reorderItems(workspace.dishes, request.body?.ids);
   if (!reordered) return response.status(400).json({ message: '菜品顺序无效，请刷新后重试。' });
-  state.dishes = reordered;
-  broadcastState();
+  workspace.dishes = reordered;
+  broadcastState(request.authUser.id);
   return response.json({ ok: true });
 });
 
 app.patch('/api/dishes/:id', (request, response) => {
-  const index = state.dishes.findIndex((item) => item.id === request.params.id);
+  const workspace = request.workspace;
+  const index = workspace.dishes.findIndex((item) => item.id === request.params.id);
   if (index === -1) return response.status(404).json({ message: '菜品不存在。' });
-  const dish = parseDish(request.body, state.dishes[index]);
+  const dish = parseDish(workspace, request.body, workspace.dishes[index]);
   if (!dish) return response.status(400).json({ message: '请检查菜品名称、分组和价格。' });
-  const duplicate = state.dishes.some((item, itemIndex) => itemIndex !== index && item.group === dish.group && item.name === dish.name);
+  const duplicate = workspace.dishes.some((item, itemIndex) => itemIndex !== index && item.group === dish.group && item.name === dish.name);
   if (duplicate) return response.status(409).json({ message: '同一分组中已存在同名菜品。' });
-  state.dishes[index] = dish;
-  broadcastState();
+  workspace.dishes[index] = dish;
+  broadcastState(request.authUser.id);
   return response.json(dish);
 });
 
 app.delete('/api/dishes/:id', (request, response) => {
-  const index = state.dishes.findIndex((item) => item.id === request.params.id);
+  const workspace = request.workspace;
+  const index = workspace.dishes.findIndex((item) => item.id === request.params.id);
   if (index === -1) return response.status(404).json({ message: '菜品不存在。' });
-  state.dishes.splice(index, 1);
-  broadcastState();
+  workspace.dishes.splice(index, 1);
+  broadcastState(request.authUser.id);
   return response.json({ ok: true });
 });
 
 app.post('/api/add-ons', (request, response) => {
+  const workspace = request.workspace;
   const addOn = parseAddOn(request.body, { active: true });
   if (!addOn) return response.status(400).json({ message: '请检查加料名称和价格。' });
-  if (state.addOns.some((item) => item.name === addOn.name)) {
+  if (workspace.addOns.some((item) => item.name === addOn.name)) {
     return response.status(409).json({ message: '已存在同名加料。' });
   }
   const created = { ...addOn, id: createId('addon'), createdAt: nowIso() };
-  state.addOns.push(created);
-  broadcastState();
+  workspace.addOns.push(created);
+  broadcastState(request.authUser.id);
   return response.status(201).json(created);
 });
 
 app.put('/api/add-ons/order', (request, response) => {
-  const reordered = reorderItems(state.addOns, request.body?.ids);
+  const workspace = request.workspace;
+  const reordered = reorderItems(workspace.addOns, request.body?.ids);
   if (!reordered) return response.status(400).json({ message: '小料顺序无效，请刷新后重试。' });
-  state.addOns = reordered;
-  broadcastState();
+  workspace.addOns = reordered;
+  broadcastState(request.authUser.id);
   return response.json({ ok: true });
 });
 
 app.patch('/api/add-ons/:id', (request, response) => {
-  const index = state.addOns.findIndex((item) => item.id === request.params.id);
+  const workspace = request.workspace;
+  const index = workspace.addOns.findIndex((item) => item.id === request.params.id);
   if (index === -1) return response.status(404).json({ message: '加料不存在。' });
-  const addOn = parseAddOn(request.body, state.addOns[index]);
+  const addOn = parseAddOn(request.body, workspace.addOns[index]);
   if (!addOn) return response.status(400).json({ message: '请检查加料名称和价格。' });
-  const duplicate = state.addOns.some((item, itemIndex) => itemIndex !== index && item.name === addOn.name);
+  const duplicate = workspace.addOns.some((item, itemIndex) => itemIndex !== index && item.name === addOn.name);
   if (duplicate) return response.status(409).json({ message: '已存在同名加料。' });
-  state.addOns[index] = addOn;
-  broadcastState();
+  workspace.addOns[index] = addOn;
+  broadcastState(request.authUser.id);
   return response.json(addOn);
 });
 
 app.delete('/api/add-ons/:id', (request, response) => {
-  const index = state.addOns.findIndex((item) => item.id === request.params.id);
+  const workspace = request.workspace;
+  const index = workspace.addOns.findIndex((item) => item.id === request.params.id);
   if (index === -1) return response.status(404).json({ message: '加料不存在。' });
-  const [removed] = state.addOns.splice(index, 1);
-  state.dishes = state.dishes.map((dish) => ({
+  const [removed] = workspace.addOns.splice(index, 1);
+  workspace.dishes = workspace.dishes.map((dish) => ({
     ...dish,
     allowedAddOnIds: dish.allowedAddOnIds.filter((id) => id !== removed.id),
     updatedAt: nowIso(),
   }));
-  broadcastState();
+  broadcastState(request.authUser.id);
   return response.json({ ok: true });
 });
 
 app.patch('/api/settings', (request, response) => {
-  const nextSettings = { ...state.settings };
+  const workspace = request.workspace;
+  const nextSettings = { ...workspace.settings };
   if (request.body?.sortMode !== undefined) {
     if (!['time', 'category'].includes(request.body.sortMode)) {
       return response.status(400).json({ message: '排序设置无效。' });
@@ -522,9 +549,9 @@ app.patch('/api/settings', (request, response) => {
     nextSettings.availableNumbers = [...new Set(availableNumbers)].sort((a, b) => a - b);
   }
 
-  state.settings = nextSettings;
-  broadcastState();
-  return response.json(state.settings);
+  workspace.settings = nextSettings;
+  broadcastState(request.authUser.id);
+  return response.json(workspace.settings);
 });
 
 const distDirectory = join(projectRoot, 'dist');

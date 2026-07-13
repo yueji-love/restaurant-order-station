@@ -25,19 +25,30 @@ users.push(user);
 
 const withTimestamps = (item) => ({ ...item, createdAt, updatedAt: createdAt });
 const allAddOnIds = DEFAULT_ADD_ONS.map((item) => item.id);
+const existingWorkspace = stored.workspaces?.[user.id] ?? {};
+const preservedWorkspaces = resetUsers ? {} : { ...(stored.workspaces ?? {}) };
 const nextState = {
-  queue: Array.isArray(stored.queue) ? stored.queue : [],
-  dishes: DEFAULT_DISHES.map((item) => withTimestamps({ ...item, allowedAddOnIds: allAddOnIds })),
-  addOns: DEFAULT_ADD_ONS.map(withTimestamps),
-  settings: stored.settings ?? {
-    sortMode: 'time',
-    sound: true,
-    availableNumbers: Array.from({ length: 36 }, (_, index) => index + 1),
-  },
   users,
   sessions: (Array.isArray(stored.sessions) ? stored.sessions : []).filter((item) => item.userId !== user.id),
-  history: Array.isArray(stored.history) ? stored.history : [],
+  workspaces: {
+    ...preservedWorkspaces,
+    [user.id]: {
+      queue: Array.isArray(existingWorkspace.queue) ? existingWorkspace.queue : [],
+      dishes: DEFAULT_DISHES.map((item) => withTimestamps({ ...item, allowedAddOnIds: allAddOnIds })),
+      addOns: DEFAULT_ADD_ONS.map(withTimestamps),
+      settings: existingWorkspace.settings ?? {
+        sortMode: 'time',
+        sound: true,
+        availableNumbers: Array.from({ length: 36 }, (_, index) => index + 1),
+      },
+      history: Array.isArray(existingWorkspace.history) ? existingWorkspace.history : [],
+    },
+  },
 };
 
 saveStateToDatabase(nextState);
-console.log(JSON.stringify({ username, dishes: nextState.dishes.length, addOns: nextState.addOns.length }));
+console.log(JSON.stringify({
+  username,
+  dishes: nextState.workspaces[user.id].dishes.length,
+  addOns: nextState.workspaces[user.id].addOns.length,
+}));
