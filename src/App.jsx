@@ -390,14 +390,8 @@ function AuthView({ onAuthenticated }) {
 
   return (
     <main className="auth-page">
-      <section className="auth-intro">
-        <span className="auth-kicker">餐厅工作台</span>
-        <h1>把点菜、出餐和经营数据放在同一个现场。</h1>
-        <div className="auth-index">
-          <span>01</span><strong>点菜</strong>
-          <span>02</span><strong>出餐</strong>
-          <span>03</span><strong>我的</strong>
-        </div>
+      <section className="auth-intro" aria-label="餐厅工作台欢迎图">
+        <img src="/auth-restaurant-workstation.png" alt="热气腾腾的粉面、号码牌与餐厅出餐台" />
       </section>
       <section className="auth-panel">
         <div className="auth-mode" role="tablist" aria-label="账号入口">
