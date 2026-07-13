@@ -4,4 +4,5 @@ dist/
 .vite/
 coverage/
 *.log
-
+.playwright-cli/
+output/
