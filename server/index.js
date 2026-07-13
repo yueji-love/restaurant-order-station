@@ -101,6 +101,9 @@ app.post('/api/orders', (request, response) => {
   if (!Number.isInteger(number) || number < 1 || number > 999 || typeof category !== 'string' || !category.trim()) {
     return response.status(400).json({ message: '订单号码或品类无效。' });
   }
+  if (state.queue.some((item) => item.number === number)) {
+    return response.status(409).json({ message: `${number}号正在使用中，请选择其他号码。` });
+  }
 
   const order = {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -116,6 +119,33 @@ app.post('/api/orders', (request, response) => {
   state.queue.push(order);
   broadcastState();
   return response.status(201).json(order);
+});
+
+app.patch('/api/orders/batch', (request, response) => {
+  const { category, action } = request.body ?? {};
+  if (typeof category !== 'string' || !category.trim()) {
+    return response.status(400).json({ message: '请选择要批量处理的品类。' });
+  }
+
+  let updated = 0;
+  if (action === 'start') {
+    state.queue = state.queue.map((item) => {
+      if (item.category !== category || item.status !== 'waiting') return item;
+      updated += 1;
+      return { ...item, status: 'making', startedAt: new Date().toISOString() };
+    });
+  } else if (action === 'complete') {
+    state.queue = state.queue.filter((item) => {
+      const shouldComplete = item.category === category && item.status === 'making';
+      if (shouldComplete) updated += 1;
+      return !shouldComplete;
+    });
+  } else {
+    return response.status(400).json({ message: '不支持的批量出餐操作。' });
+  }
+
+  if (updated > 0) broadcastState();
+  return response.json({ updated });
 });
 
 app.patch('/api/orders/:id', (request, response) => {

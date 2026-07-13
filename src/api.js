@@ -29,6 +29,14 @@ export function updateOrder(id, action) {
   });
 }
 
+export function updateOrdersBatch(category, action) {
+  return request('/api/orders/batch', {
+    method: 'PATCH',
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ category, action }),
+  });
+}
+
 export function saveSettings(settings) {
   return request('/api/settings', {
     method: 'PATCH',

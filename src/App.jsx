@@ -16,10 +16,10 @@ import {
   saveSettings,
   subscribeToState,
   updateOrder,
+  updateOrdersBatch,
 } from './api.js';
 
 const STEPS = ['选号码', '选品类', '选小料', '确认'];
-const UNAVAILABLE_NUMBERS = new Set([3, 11, 21, 28]);
 const CATEGORIES = [
   { name: '双拼饭', note: '两荤一素' },
   { name: '招牌拌面', note: '现拌现出' },
@@ -63,13 +63,14 @@ function App() {
   const [extras, setExtras] = useState([]);
   const [queue, setQueue] = useState([]);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
-  const [syncStatus, setSyncStatus] = useState('connecting');
+  const [, setSyncStatus] = useState('connecting');
   const [settingsStatus, setSettingsStatus] = useState('idle');
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
   const [submitError, setSubmitError] = useState('');
   const queueCount = useRef(0);
   const queueInitialized = useRef(false);
+  const unavailableNumbers = useMemo(() => new Set(queue.map((item) => item.number)), [queue]);
 
   useEffect(() => {
     let active = true;
@@ -141,6 +142,12 @@ function App() {
     } catch (error) {
       setSubmitting(false);
       setSubmitError(error.message);
+      if (error.message.includes('使用中')) {
+        setNumber(null);
+        setCategory(null);
+        setExtras([]);
+        setStep(0);
+      }
     }
   };
 
@@ -166,9 +173,17 @@ function App() {
     }
   };
 
+  const changeCategoryStatus = async (categoryName, action) => {
+    try {
+      await updateOrdersBatch(categoryName, action);
+    } catch {
+      setSyncStatus('error');
+    }
+  };
+
   return (
     <div className="app-shell">
-      <Header view={view} syncStatus={syncStatus} onViewChange={setView} />
+      <Header view={view} onViewChange={setView} />
       {view === 'order' && (
         <OrderView
           step={step}
@@ -178,6 +193,7 @@ function App() {
           submitting={submitting}
           success={success}
           submitError={submitError}
+          unavailableNumbers={unavailableNumbers}
           onStepBack={() => setStep((current) => Math.max(0, current - 1))}
           onNumberChange={selectNumber}
           onCategoryChange={setCategory}
@@ -188,7 +204,12 @@ function App() {
         />
       )}
       {view === 'kitchen' && (
-        <KitchenView queue={queue} settings={settings} syncStatus={syncStatus} onOrderAction={changeOrderStatus} />
+        <KitchenView
+          queue={queue}
+          settings={settings}
+          onOrderAction={changeOrderStatus}
+          onCategoryAction={changeCategoryStatus}
+        />
       )}
       {view === 'settings' && (
         <SettingsView settings={settings} status={settingsStatus} onChange={changeSettings} />
@@ -197,7 +218,7 @@ function App() {
   );
 }
 
-function Header({ view, syncStatus, onViewChange }) {
+function Header({ view, onViewChange }) {
   const items = [
     { id: 'order', label: '点单', Icon: ClipboardText },
     { id: 'kitchen', label: '出餐', Icon: CookingPot },
@@ -223,9 +244,6 @@ function Header({ view, syncStatus, onViewChange }) {
           </button>
         ))}
       </nav>
-      <div className={`topbar__shift ${syncStatus === 'error' ? 'is-error' : ''}`}>
-        {syncStatus === 'connected' ? '实时同步' : '正在重连'}
-      </div>
     </header>
   );
 }
@@ -238,6 +256,7 @@ function OrderView({
   submitting,
   success,
   submitError,
+  unavailableNumbers,
   onStepBack,
   onNumberChange,
   onCategoryChange,
@@ -266,7 +285,7 @@ function OrderView({
             )}
           </div>
 
-          {step === 0 && <NumberGrid value={number} onChange={onNumberChange} />}
+          {step === 0 && <NumberGrid value={number} unavailableNumbers={unavailableNumbers} onChange={onNumberChange} />}
           {step === 1 && <CategoryGrid value={category} onChange={onCategoryChange} />}
           {step === 2 && <ExtraGrid value={extras} onChange={onExtrasChange} />}
           {step === 3 && (
@@ -312,11 +331,11 @@ function Progress({ step }) {
   );
 }
 
-function NumberGrid({ value, onChange }) {
+function NumberGrid({ value, unavailableNumbers, onChange }) {
   return (
     <div className="number-grid" role="group" aria-label="可用号码">
       {Array.from({ length: 36 }, (_, index) => index + 1).map((item) => {
-        const unavailable = UNAVAILABLE_NUMBERS.has(item);
+        const unavailable = unavailableNumbers.has(item);
         const selected = value === item;
         return (
           <button
@@ -491,24 +510,47 @@ function ActionBar({ step, number, category, extras, submitting, success, submit
   );
 }
 
-function KitchenView({ queue, settings, syncStatus, onOrderAction }) {
+function KitchenView({ queue, settings, onOrderAction, onCategoryAction }) {
   const [pendingId, setPendingId] = useState(null);
+  const [selectedCategory, setSelectedCategory] = useState('');
+  const [batchAction, setBatchAction] = useState(null);
   const [now, setNow] = useState(Date.now());
+  const categoryMode = settings.sortMode === 'category';
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
 
+  const categoryGroups = useMemo(() => {
+    const groups = new Map();
+    queue.forEach((item) => {
+      const current = groups.get(item.category) ?? { name: item.category, count: 0, waiting: 0, making: 0 };
+      current.count += 1;
+      current[item.status === 'waiting' ? 'waiting' : 'making'] += 1;
+      groups.set(item.category, current);
+    });
+    return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+  }, [queue]);
+
+  const activeCategory = categoryGroups.some((item) => item.name === selectedCategory)
+    ? selectedCategory
+    : categoryGroups[0]?.name ?? '';
+  const activeGroup = categoryGroups.find((item) => item.name === activeCategory);
+
   const orderedQueue = useMemo(
     () => [...queue].sort((a, b) => {
-      if (settings.sortMode === 'category') {
+      if (categoryMode) {
         return a.category.localeCompare(b.category, 'zh-CN') || Date.parse(a.createdAt) - Date.parse(b.createdAt);
       }
       return Date.parse(a.createdAt) - Date.parse(b.createdAt);
     }),
-    [queue, settings.sortMode],
+    [categoryMode, queue],
   );
+
+  const visibleQueue = categoryMode && activeCategory
+    ? orderedQueue.filter((item) => item.category === activeCategory)
+    : orderedQueue;
 
   const actOnOrder = async (item) => {
     setPendingId(item.id);
@@ -516,18 +558,64 @@ function KitchenView({ queue, settings, syncStatus, onOrderAction }) {
     setPendingId(null);
   };
 
+  const actOnCategory = async (action) => {
+    if (!activeCategory) return;
+    setBatchAction(action);
+    await onCategoryAction(activeCategory, action);
+    setBatchAction(null);
+  };
+
   return (
     <main className="secondary-page">
-      <div className="page-heading">
-        <div>
-          <p>{settings.sortMode === 'category' ? '按品类排列' : '按下单顺序'}</p>
-          <h1>出餐队列</h1>
+      <div className="page-heading kitchen-heading">
+        <h1>{categoryMode ? '按品类出餐' : '按下单顺序'}</h1>
+        <div className="order-count" aria-label={`${queue.length}单待处理`}>
+          <strong>{queue.length}</strong>
+          <span>单待处理</span>
         </div>
-        <span>{syncStatus === 'connected' ? `${queue.length} 单待处理` : '正在恢复同步'}</span>
       </div>
-      {orderedQueue.length ? (
+
+      {categoryMode && categoryGroups.length > 0 && (
+        <section className="category-controls" aria-label="按品类筛选和批量出餐">
+          <div className="category-tabs" role="tablist" aria-label="品类">
+            {categoryGroups.map((item) => (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={item.name === activeCategory}
+                className={item.name === activeCategory ? 'is-active' : ''}
+                key={item.name}
+                onClick={() => setSelectedCategory(item.name)}
+              >
+                <span>{item.name}</span>
+                <strong>{item.count}</strong>
+              </button>
+            ))}
+          </div>
+          <div className="category-batch-actions">
+            <button
+              type="button"
+              className="batch-start-button"
+              disabled={!activeGroup?.waiting || batchAction !== null}
+              onClick={() => actOnCategory('start')}
+            >
+              {batchAction === 'start' ? '正在开始' : `一键开始制作 ${activeGroup?.waiting ?? 0}`}
+            </button>
+            <button
+              type="button"
+              className="batch-complete-button"
+              disabled={!activeGroup?.making || batchAction !== null}
+              onClick={() => actOnCategory('complete')}
+            >
+              {batchAction === 'complete' ? '正在出餐' : `一键出餐 ${activeGroup?.making ?? 0}`}
+            </button>
+          </div>
+        </section>
+      )}
+
+      {visibleQueue.length ? (
         <div className="queue-grid">
-          {orderedQueue.map((item) => (
+          {visibleQueue.map((item) => (
             <article className={`queue-card status-${item.status}`} key={item.id}>
               <div className="queue-card__topline">
                 <div className="queue-card__number">{String(item.number).padStart(2, '0')}<small>号</small></div>
