@@ -62,7 +62,18 @@ database.exec(`
     id TEXT PRIMARY KEY,
     data_json TEXT NOT NULL
   ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS order_history (
+    id TEXT PRIMARY KEY,
+    completed_at TEXT NOT NULL,
+    data_json TEXT NOT NULL
+  ) STRICT;
 `);
+
+const dishColumns = database.prepare('PRAGMA table_info(dishes)').all();
+if (!dishColumns.some((column) => column.name === 'allowed_add_on_ids_json')) {
+  database.exec('ALTER TABLE dishes ADD COLUMN allowed_add_on_ids_json TEXT');
+}
 
 function parseJson(value, fallback) {
   try {
@@ -90,6 +101,9 @@ export function loadStateFromDatabase() {
       active: Boolean(row.active),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      allowedAddOnIds: row.allowed_add_on_ids_json === null
+        ? undefined
+        : parseJson(row.allowed_add_on_ids_json, []),
     })),
     addOns: database.prepare('SELECT * FROM add_ons ORDER BY created_at, rowid').all().map((row) => ({
       id: row.id,
@@ -115,6 +129,8 @@ export function loadStateFromDatabase() {
       createdAt: row.created_at,
       expiresAt: row.expires_at,
     })),
+    history: database.prepare('SELECT data_json FROM order_history ORDER BY completed_at DESC, rowid DESC').all()
+      .map((row) => parseJson(row.data_json, null)).filter(Boolean),
   };
 }
 
@@ -128,18 +144,19 @@ export function saveStateToDatabase(state) {
     INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)
   `);
   const insertDish = database.prepare(`
-    INSERT INTO dishes (id, group_name, name, note, price_cents, active, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO dishes (id, group_name, name, note, price_cents, active, created_at, updated_at, allowed_add_on_ids_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertAddOn = database.prepare(`
     INSERT INTO add_ons (id, name, price_cents, active, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?)
   `);
   const insertOrder = database.prepare('INSERT INTO orders (id, data_json) VALUES (?, ?)');
+  const insertHistory = database.prepare('INSERT INTO order_history (id, completed_at, data_json) VALUES (?, ?, ?)');
 
   database.exec('BEGIN IMMEDIATE');
   try {
-    database.exec('DELETE FROM sessions; DELETE FROM users; DELETE FROM dishes; DELETE FROM add_ons; DELETE FROM orders; DELETE FROM settings;');
+    database.exec('DELETE FROM sessions; DELETE FROM users; DELETE FROM dishes; DELETE FROM add_ons; DELETE FROM orders; DELETE FROM order_history; DELETE FROM settings;');
     insertSettings.run(JSON.stringify(state.settings ?? {}));
     for (const user of state.users ?? []) {
       insertUser.run(user.id, user.username, user.usernameNormalized, user.passwordHash, user.passwordSalt, user.createdAt, user.demo ? 1 : 0);
@@ -148,13 +165,16 @@ export function saveStateToDatabase(state) {
       insertSession.run(session.tokenHash, session.userId, session.createdAt, session.expiresAt);
     }
     for (const dish of state.dishes ?? []) {
-      insertDish.run(dish.id, dish.group, dish.name, dish.note ?? '', dish.priceCents, dish.active ? 1 : 0, dish.createdAt, dish.updatedAt);
+      insertDish.run(dish.id, dish.group, dish.name, dish.note ?? '', dish.priceCents, dish.active ? 1 : 0, dish.createdAt, dish.updatedAt, JSON.stringify(dish.allowedAddOnIds ?? []));
     }
     for (const addOn of state.addOns ?? []) {
       insertAddOn.run(addOn.id, addOn.name, addOn.priceCents, addOn.active ? 1 : 0, addOn.createdAt, addOn.updatedAt);
     }
     for (const order of state.queue ?? []) {
       insertOrder.run(order.id, JSON.stringify(order));
+    }
+    for (const order of state.history ?? []) {
+      insertHistory.run(order.id, order.completedAt, JSON.stringify(order));
     }
     database.exec('COMMIT');
   } catch (error) {

@@ -1,0 +1,32 @@
+function aggregateBy(items, keySelector, valueSelector = () => 1) {
+  const totals = new Map();
+  items.forEach((item) => {
+    const key = keySelector(item);
+    if (!key) return;
+    totals.set(key, (totals.get(key) ?? 0) + valueSelector(item));
+  });
+  return [...totals.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-CN'));
+}
+
+export function buildAnalytics(history, from, to) {
+  const orders = history.filter((order) => {
+    const completedAt = Date.parse(order.completedAt);
+    return Number.isFinite(completedAt) && completedAt >= from && completedAt < to;
+  });
+  const revenueCents = orders.reduce((sum, order) => sum + (order.totalCents ?? 0), 0);
+  const addOnRows = orders.flatMap((order) => order.addOns ?? []);
+  return {
+    range: { from: new Date(from).toISOString(), to: new Date(to).toISOString() },
+    summary: {
+      revenueCents,
+      orderCount: orders.length,
+      averageOrderCents: orders.length ? Math.round(revenueCents / orders.length) : 0,
+      addOnCount: addOnRows.length,
+    },
+    categories: aggregateBy(orders, (order) => order.dishGroup || '未分类'),
+    dishes: aggregateBy(orders, (order) => order.category),
+    addOns: aggregateBy(addOnRows, (addOn) => addOn.name),
+  };
+}

@@ -39,6 +39,11 @@ export function getState() {
   return request('/api/state');
 }
 
+export function getAnalytics({ from, to }) {
+  const query = new URLSearchParams({ from, to });
+  return request(`/api/analytics?${query.toString()}`);
+}
+
 export function createOrder(order) {
   return request('/api/orders', {
     method: 'POST',

@@ -24,9 +24,10 @@ const users = (resetUsers ? [] : Array.isArray(stored.users) ? stored.users : []
 users.push(user);
 
 const withTimestamps = (item) => ({ ...item, createdAt, updatedAt: createdAt });
+const allAddOnIds = DEFAULT_ADD_ONS.map((item) => item.id);
 const nextState = {
   queue: Array.isArray(stored.queue) ? stored.queue : [],
-  dishes: DEFAULT_DISHES.map(withTimestamps),
+  dishes: DEFAULT_DISHES.map((item) => withTimestamps({ ...item, allowedAddOnIds: allAddOnIds })),
   addOns: DEFAULT_ADD_ONS.map(withTimestamps),
   settings: stored.settings ?? {
     sortMode: 'time',
@@ -35,6 +36,7 @@ const nextState = {
   },
   users,
   sessions: (Array.isArray(stored.sessions) ? stored.sessions : []).filter((item) => item.userId !== user.id),
+  history: Array.isArray(stored.history) ? stored.history : [],
 };
 
 saveStateToDatabase(nextState);

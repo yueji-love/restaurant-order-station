@@ -2,16 +2,17 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
+  ChartBar,
   Check,
   ClipboardText,
   CookingPot,
   ForkKnife,
-  GearSix,
   LockSimple,
   PencilSimple,
   Plus,
   SignOut,
   SlidersHorizontal,
+  Storefront,
   Trash,
   UserCircle,
   X,
@@ -23,6 +24,7 @@ import {
   deleteAddOn,
   deleteDish,
   getCurrentUser,
+  getAnalytics,
   getState,
   loginUser,
   logoutUser,
@@ -37,7 +39,7 @@ import {
 
 const DEFAULT_AVAILABLE_NUMBERS = Array.from({ length: 36 }, (_, index) => index + 1);
 const DEFAULT_SETTINGS = { sortMode: 'time', sound: true, availableNumbers: DEFAULT_AVAILABLE_NUMBERS };
-const EMPTY_DISH_FORM = { group: '', name: '', note: '', price: '', active: true };
+const EMPTY_DISH_FORM = { group: '', name: '', note: '', price: '', active: true, allowedAddOnIds: [] };
 const EMPTY_ADD_ON_FORM = { name: '', price: '', active: true };
 
 let notificationAudioContext;
@@ -87,6 +89,7 @@ function App() {
   const [view, setView] = useState('order');
   const [step, setStep] = useState(0);
   const [number, setNumber] = useState(null);
+  const [selectedGroup, setSelectedGroup] = useState('');
   const [category, setCategory] = useState(null);
   const [extras, setExtras] = useState([]);
   const [queue, setQueue] = useState([]);
@@ -178,12 +181,22 @@ function App() {
 
   useEffect(() => {
     const activeIds = new Set(addOns.filter((item) => item.active).map((item) => item.id));
-    setExtras((current) => current.filter((item) => activeIds.has(item.id)));
-  }, [addOns]);
+    const allowedIds = new Set(category?.allowedAddOnIds ?? []);
+    setExtras((current) => current.filter((item) => activeIds.has(item.id) && allowedIds.has(item.id)));
+  }, [addOns, category]);
+
+  useEffect(() => {
+    if (selectedGroup && !dishes.some((item) => item.active && item.group === selectedGroup)) {
+      setSelectedGroup('');
+      setCategory(null);
+      setExtras([]);
+    }
+  }, [dishes, selectedGroup]);
 
   const resetOrder = () => {
     setStep(0);
     setNumber(null);
+    setSelectedGroup('');
     setCategory(null);
     setExtras([]);
     setSubmitting(false);
@@ -196,6 +209,12 @@ function App() {
     setStep(1);
   };
 
+  const selectGroup = (group) => {
+    setSelectedGroup(group);
+    setCategory(null);
+    setExtras([]);
+  };
+
   const selectCategory = (nextCategory) => {
     setCategory(nextCategory);
     setStep(2);
@@ -203,7 +222,20 @@ function App() {
 
   const selectExtras = (nextExtras) => {
     setExtras(nextExtras);
-    setStep(3);
+  };
+
+  const stepBack = () => {
+    if (step === 2) {
+      setCategory(null);
+      setExtras([]);
+      setStep(1);
+      return;
+    }
+    if (step === 1) {
+      setSelectedGroup('');
+      setNumber(null);
+      setStep(0);
+    }
   };
 
   const submitOrder = async () => {
@@ -279,6 +311,7 @@ function App() {
           step={step}
           number={number}
           category={category}
+          selectedGroup={selectedGroup}
           extras={extras}
           dishes={dishes.filter((item) => item.active)}
           addOns={addOns.filter((item) => item.active)}
@@ -287,8 +320,9 @@ function App() {
           submitError={submitError}
           unavailableNumbers={unavailableNumbers}
           availableNumbers={settings.availableNumbers ?? DEFAULT_AVAILABLE_NUMBERS}
-          onStepBack={() => setStep((current) => Math.max(0, current - 1))}
+          onStepBack={stepBack}
           onNumberChange={selectNumber}
+          onGroupChange={selectGroup}
           onCategoryChange={selectCategory}
           onExtrasChange={selectExtras}
           onSubmit={submitOrder}
@@ -303,9 +337,14 @@ function App() {
           onCategoryAction={changeCategoryStatus}
         />
       )}
-      {view === 'menu' && <MenuManagementView dishes={dishes} addOns={addOns} />}
-      {view === 'settings' && (
-        <SettingsView settings={settings} status={settingsStatus} onChange={changeSettings} />
+      {view === 'mine' && (
+        <MineView
+          dishes={dishes}
+          addOns={addOns}
+          settings={settings}
+          settingsStatus={settingsStatus}
+          onSettingsChange={changeSettings}
+        />
       )}
     </div>
   );
@@ -350,11 +389,11 @@ function AuthView({ onAuthenticated }) {
     <main className="auth-page">
       <section className="auth-intro">
         <span className="auth-kicker">餐厅工作台</span>
-        <h1>把点单、出餐和菜单放在同一个现场。</h1>
+        <h1>把点菜、出餐和经营数据放在同一个现场。</h1>
         <div className="auth-index">
-          <span>01</span><strong>点单</strong>
+          <span>01</span><strong>点菜</strong>
           <span>02</span><strong>出餐</strong>
-          <span>03</span><strong>菜品</strong>
+          <span>03</span><strong>我的</strong>
         </div>
       </section>
       <section className="auth-panel">
@@ -390,10 +429,9 @@ function AuthView({ onAuthenticated }) {
 
 function Header({ view, user, onViewChange, onLogout }) {
   const items = [
-    { id: 'order', label: '点单', Icon: ClipboardText },
+    { id: 'order', label: '点菜', Icon: ClipboardText },
     { id: 'kitchen', label: '出餐', Icon: CookingPot },
-    { id: 'menu', label: '菜品', Icon: ForkKnife },
-    { id: 'settings', label: '设置', Icon: GearSix },
+    { id: 'mine', label: '我的', Icon: UserCircle },
   ];
 
   return (
@@ -428,6 +466,7 @@ function OrderView({
   step,
   number,
   category,
+  selectedGroup,
   extras,
   dishes,
   addOns,
@@ -438,12 +477,16 @@ function OrderView({
   availableNumbers,
   onStepBack,
   onNumberChange,
+  onGroupChange,
   onCategoryChange,
   onExtrasChange,
   onSubmit,
   onReset,
 }) {
-  const title = ['选择号码', '选择菜品', '选择加料', '确认订单'][step];
+  const title = ['选择号码', '选择品类与菜品', '选择小料'][step];
+  const availableAddOns = category
+    ? addOns.filter((item) => category.allowedAddOnIds?.includes(item.id))
+    : [];
 
   return (
     <main className="order-page">
@@ -462,9 +505,16 @@ function OrderView({
           </div>
 
           {step === 0 && <NumberGrid value={number} availableNumbers={availableNumbers} unavailableNumbers={unavailableNumbers} onChange={onNumberChange} />}
-          {step === 1 && <DishGrid dishes={dishes} value={category} onChange={onCategoryChange} />}
-          {step === 2 && <ExtraGrid items={addOns} value={extras} onChange={onExtrasChange} />}
-          {step === 3 && <ConfirmPanel number={number} category={category} extras={extras} />}
+          {step === 1 && (
+            <CategoryDishPicker
+              dishes={dishes}
+              selectedGroup={selectedGroup}
+              value={category}
+              onGroupChange={onGroupChange}
+              onDishChange={onCategoryChange}
+            />
+          )}
+          {step === 2 && <ExtraGrid items={availableAddOns} value={extras} onChange={onExtrasChange} />}
         </section>
 
         <OrderSummary number={number} category={category} extras={extras} />
@@ -512,35 +562,34 @@ function NumberGrid({ value, availableNumbers, unavailableNumbers, onChange }) {
   );
 }
 
-function DishGrid({ dishes, value, onChange }) {
+function CategoryDishPicker({ dishes, selectedGroup, value, onGroupChange, onDishChange }) {
   if (!dishes.length) {
-    return <div className="selection-empty"><ForkKnife size={42} weight="thin" /><strong>暂无启用菜品</strong><span>请先到“菜品”页面录入。</span></div>;
+    return <div className="selection-empty"><ForkKnife size={42} weight="thin" /><strong>暂无启用菜品</strong><span>请先到“我的”中录入菜品。</span></div>;
   }
+  const groups = [...new Set(dishes.map((item) => item.group))];
+  const visibleDishes = selectedGroup ? dishes.filter((item) => item.group === selectedGroup) : [];
   return (
-    <div className="option-grid" role="radiogroup" aria-label="菜品">
-      {dishes.map((item) => {
-        const selected = value?.id === item.id;
-        return (
-          <button
-            type="button"
-            className={`option-card ${selected ? 'is-selected' : ''}`}
-            role="radio"
-            aria-checked={selected}
-            key={item.id}
-            onClick={() => onChange(item)}
-          >
-            <span className="option-card__copy">
-              <small>{item.group}</small>
-              <strong>{item.name}</strong>
-              {item.note && <small>{item.note}</small>}
-            </span>
-            <span className="option-card__aside">
-              <b>{formatPrice(item.priceCents)}</b>
-              <span className="option-card__indicator" aria-hidden="true">{selected && <Check size={18} weight="bold" />}</span>
-            </span>
+    <div className="category-dish-picker">
+      <div className="order-category-tabs" role="tablist" aria-label="品类">
+        {groups.map((group) => (
+          <button type="button" role="tab" aria-selected={selectedGroup === group} className={selectedGroup === group ? 'is-active' : ''} key={group} onClick={() => onGroupChange(group)}>
+            <strong>{group}</strong><span>{dishes.filter((item) => item.group === group).length}</span>
           </button>
-        );
-      })}
+        ))}
+      </div>
+      {selectedGroup ? (
+        <div className="option-grid dish-options" role="radiogroup" aria-label={`${selectedGroup}菜品`}>
+          {visibleDishes.map((item) => {
+            const selected = value?.id === item.id;
+            return (
+              <button type="button" className={`option-card ${selected ? 'is-selected' : ''}`} role="radio" aria-checked={selected} key={item.id} onClick={() => onDishChange(item)}>
+                <span className="option-card__copy"><strong>{item.name}</strong>{item.note && <small>{item.note}</small>}</span>
+                <span className="option-card__aside"><b>{formatPrice(item.priceCents)}</b><span className="option-card__indicator" aria-hidden="true">{selected && <Check size={18} weight="bold" />}</span></span>
+              </button>
+            );
+          })}
+        </div>
+      ) : <div className="category-prompt">先选择一个品类，下方会显示菜品。</div>}
     </div>
   );
 }
@@ -553,11 +602,7 @@ function ExtraGrid({ items, value, onChange }) {
   };
 
   return (
-    <div className="option-grid" role="group" aria-label="加料">
-      <button type="button" className="option-card option-card--skip" onClick={() => onChange([])}>
-        <span className="option-card__copy"><strong>不加料</strong><small>直接确认订单</small></span>
-        <ArrowRight size={22} aria-hidden="true" />
-      </button>
+    <div className="option-grid" role="group" aria-label="小料">
       {items.map((item) => {
         const selected = value.some((selectedItem) => selectedItem.id === item.id);
         return (
@@ -573,6 +618,7 @@ function ExtraGrid({ items, value, onChange }) {
           </button>
         );
       })}
+      {!items.length && <div className="selection-empty selection-empty--compact"><strong>这个菜品没有可选小料</strong><span>可以直接确认下单。</span></div>}
     </div>
   );
 }
@@ -584,7 +630,7 @@ function ConfirmPanel({ number, category, extras }) {
       <div className="confirm-number"><span>{String(number).padStart(2, '0')}</span><small>号</small></div>
       <div className="confirm-details">
         <div><span>菜品</span><strong>{category?.name}</strong></div>
-        <div><span>加料</span><strong>{extras.length ? extras.map((item) => item.name).join('、') : '不加料'}</strong></div>
+        <div><span>小料</span><strong>{extras.length ? extras.map((item) => item.name).join('、') : '不加小料'}</strong></div>
         <div><span>合计</span><strong>{formatPrice(total)}</strong></div>
       </div>
     </div>
@@ -602,7 +648,7 @@ function OrderSummary({ number, category, extras }) {
       {hasSelection ? (
         <dl className="summary-list">
           <div><dt>菜品</dt><dd>{category?.name ?? '尚未选择'}</dd></div>
-          <div><dt>加料</dt><dd>{extras.length ? extras.map((item) => item.name).join('、') : '未添加'}</dd></div>
+          <div><dt>小料</dt><dd>{extras.length ? extras.map((item) => item.name).join('、') : '未添加'}</dd></div>
           {category && <div><dt>合计</dt><dd>{formatPrice(total)}</dd></div>}
         </dl>
       ) : (
@@ -615,14 +661,14 @@ function OrderSummary({ number, category, extras }) {
 function ActionBar({ step, number, category, extras, submitting, success, submitError, onSubmit, onReset }) {
   const summary = [number ? `${number}号` : null, category?.name, extras.length ? extras.map((item) => item.name).join('、') : null].filter(Boolean).join(' / ');
   return (
-    <footer className={`action-bar ${step < 3 ? 'is-auto-flow' : ''}`}>
+    <footer className={`action-bar ${step < 2 ? 'is-auto-flow' : ''}`}>
       <button type="button" className="clear-button" onClick={onReset} disabled={!number && !category && !extras.length}>
         <Trash size={20} aria-hidden="true" />清空选择
       </button>
       <div className={`action-bar__summary ${submitError ? 'is-error' : ''}`} aria-live="polite">{submitError || summary}</div>
-      {step === 3 && (
+      {step === 2 && (
         <button type="button" className={`primary-button ${success ? 'is-success' : ''}`} disabled={submitting || success} onClick={onSubmit}>
-          {success ? <><Check size={22} weight="bold" />下单成功</> : submitting ? '正在下单' : <>确认下单<ArrowRight size={22} weight="bold" /></>}
+          {success ? <><Check size={22} weight="bold" />下单成功</> : submitting ? '正在下单' : <>确认下单 {formatPrice((category?.priceCents ?? 0) + extras.reduce((sum, item) => sum + item.priceCents, 0))}<ArrowRight size={22} weight="bold" /></>}
         </button>
       )}
     </footer>
@@ -707,7 +753,7 @@ function KitchenView({ queue, settings, onOrderAction, onCategoryAction }) {
                 <span>{Math.max(0, Math.floor((now - Date.parse(item.createdAt)) / 60_000))} 分钟</span>
               </div>
               <h2>{item.category}</h2>
-              <p>{item.extras?.length ? item.extras.join('、') : '不加料'}</p>
+              <p>{item.extras?.length ? item.extras.join('、') : '不加小料'}</p>
               <div className="queue-card__action">
                 <button type="button" className={item.status === 'waiting' ? 'queue-button' : 'ready-button'} disabled={pendingId === item.id} onClick={() => actOnOrder(item)}>
                   {pendingId === item.id ? '正在更新' : item.status === 'waiting' ? '开始制作' : '完成取餐'}
@@ -723,8 +769,129 @@ function KitchenView({ queue, settings, onOrderAction, onCategoryAction }) {
   );
 }
 
-function MenuManagementView({ dishes, addOns }) {
-  const [mode, setMode] = useState('dishes');
+function MineView({ dishes, addOns, settings, settingsStatus, onSettingsChange }) {
+  const [section, setSection] = useState('dashboard');
+  const items = [
+    { id: 'dashboard', label: '数据看板', Icon: ChartBar },
+    { id: 'dishes', label: '菜品管理', Icon: ForkKnife },
+    { id: 'addOns', label: '小料库', Icon: Storefront },
+    { id: 'settings', label: '工作台设置', Icon: SlidersHorizontal },
+  ];
+
+  return (
+    <div className="mine-shell">
+      <nav className="mine-nav" aria-label="我的功能">
+        {items.map(({ id, label, Icon }) => (
+          <button type="button" className={section === id ? 'is-active' : ''} aria-current={section === id ? 'page' : undefined} key={id} onClick={() => setSection(id)}>
+            <Icon size={19} weight={section === id ? 'fill' : 'regular'} /><span>{label}</span>
+          </button>
+        ))}
+      </nav>
+      {section === 'dashboard' && <DashboardView />}
+      {section === 'dishes' && <MenuManagementView key="dishes" dishes={dishes} addOns={addOns} initialMode="dishes" hideModeTabs />}
+      {section === 'addOns' && <MenuManagementView key="addOns" dishes={dishes} addOns={addOns} initialMode="addOns" hideModeTabs />}
+      {section === 'settings' && <SettingsView settings={settings} status={settingsStatus} onChange={onSettingsChange} />}
+    </div>
+  );
+}
+
+function toDateInput(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function analyticsRange(preset, customFrom, customTo) {
+  const today = new Date();
+  const end = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+  if (preset === 'custom') {
+    const from = new Date(`${customFrom}T00:00:00`);
+    const customEnd = new Date(`${customTo}T00:00:00`);
+    if (!Number.isFinite(from.getTime()) || !Number.isFinite(customEnd.getTime()) || from > customEnd) return null;
+    customEnd.setDate(customEnd.getDate() + 1);
+    return { from: from.toISOString(), to: customEnd.toISOString() };
+  }
+  const days = preset === 'today' ? 1 : Number(preset);
+  const from = new Date(today.getFullYear(), today.getMonth(), today.getDate() - days + 1);
+  return { from: from.toISOString(), to: end.toISOString() };
+}
+
+function DashboardView() {
+  const today = new Date();
+  const [preset, setPreset] = useState('today');
+  const [customFrom, setCustomFrom] = useState(toDateInput(today));
+  const [customTo, setCustomTo] = useState(toDateInput(today));
+  const [data, setData] = useState(null);
+  const [status, setStatus] = useState('loading');
+
+  useEffect(() => {
+    let active = true;
+    setStatus('loading');
+    const range = analyticsRange(preset, customFrom, customTo);
+    if (!range) {
+      setStatus('error');
+      return () => { active = false; };
+    }
+    getAnalytics(range)
+      .then((result) => {
+        if (!active) return;
+        setData(result);
+        setStatus('ready');
+      })
+      .catch(() => active && setStatus('error'));
+    return () => { active = false; };
+  }, [preset, customFrom, customTo]);
+
+  const summary = data?.summary ?? { revenueCents: 0, orderCount: 0, averageOrderCents: 0, addOnCount: 0 };
+  return (
+    <main className="secondary-page dashboard-page">
+      <div className="page-heading dashboard-heading"><div><p>历史经营数据</p><h1>数据看板</h1></div><span>按完成取餐时间统计</span></div>
+      <div className="dashboard-filters" role="group" aria-label="统计时间">
+        {[['today', '今天'], ['7', '近 7 天'], ['30', '近 30 天'], ['custom', '自定义']].map(([id, label]) => (
+          <button type="button" className={preset === id ? 'is-active' : ''} key={id} onClick={() => setPreset(id)}>{label}</button>
+        ))}
+        {preset === 'custom' && (
+          <div className="dashboard-custom-range">
+            <label>开始<input type="date" value={customFrom} max={customTo} onChange={(event) => setCustomFrom(event.target.value)} /></label>
+            <label>结束<input type="date" value={customTo} min={customFrom} onChange={(event) => setCustomTo(event.target.value)} /></label>
+          </div>
+        )}
+      </div>
+      {status === 'error' && <div className="dashboard-state">数据读取失败，请稍后重试。</div>}
+      {status === 'loading' && <div className="dashboard-state">正在汇总历史订单</div>}
+      {status === 'ready' && (
+        <>
+          <section className="dashboard-metrics" aria-label="经营汇总">
+            <div><span>营业额</span><strong>{formatPrice(summary.revenueCents)}</strong></div>
+            <div><span>完成订单</span><strong>{summary.orderCount}<small> 单</small></strong></div>
+            <div><span>平均客单</span><strong>{formatPrice(summary.averageOrderCents)}</strong></div>
+            <div><span>售出小料</span><strong>{summary.addOnCount}<small> 份</small></strong></div>
+          </section>
+          {summary.orderCount ? (
+            <div className="dashboard-rankings">
+              <RankingList title="热销菜品" items={data.dishes} />
+              <RankingList title="品类销量" items={data.categories} />
+              <RankingList title="小料销量" items={data.addOns} emptyText="所选时间内没有售出小料" />
+            </div>
+          ) : <div className="dashboard-empty"><ChartBar size={48} weight="thin" /><h2>这个时间段还没有完成订单</h2><p>订单完成取餐后，会自动进入历史统计。</p></div>}
+        </>
+      )}
+    </main>
+  );
+}
+
+function RankingList({ title, items = [], emptyText = '暂无数据' }) {
+  return (
+    <section className="ranking-panel">
+      <h2>{title}</h2>
+      {items.length ? <ol>{items.slice(0, 8).map((item, index) => <li key={item.name}><span>{String(index + 1).padStart(2, '0')}</span><strong>{item.name}</strong><b>{item.count}</b></li>)}</ol> : <p>{emptyText}</p>}
+    </section>
+  );
+}
+
+function MenuManagementView({ dishes, addOns, initialMode = 'dishes', hideModeTabs = false }) {
+  const [mode, setMode] = useState(initialMode);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(EMPTY_DISH_FORM);
   const [status, setStatus] = useState('idle');
@@ -745,7 +912,7 @@ function MenuManagementView({ dishes, addOns }) {
   const editItem = (item) => {
     setEditingId(item.id);
     setForm(mode === 'dishes'
-      ? { group: item.group, name: item.name, note: item.note, price: String(item.priceCents / 100), active: item.active }
+      ? { group: item.group, name: item.name, note: item.note, price: String(item.priceCents / 100), active: item.active, allowedAddOnIds: item.allowedAddOnIds ?? [] }
       : { name: item.name, price: String(item.priceCents / 100), active: item.active });
     setMessage('');
   };
@@ -808,41 +975,64 @@ function MenuManagementView({ dishes, addOns }) {
   const orderedItems = [...items].sort((a, b) => mode === 'dishes'
     ? a.group.localeCompare(b.group, 'zh-CN') || a.name.localeCompare(b.name, 'zh-CN')
     : a.name.localeCompare(b.name, 'zh-CN'));
+  const groups = [...new Set(dishes.map((item) => item.group))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+
+  const toggleAllowedAddOn = (id) => {
+    const selected = form.allowedAddOnIds ?? [];
+    setForm({
+      ...form,
+      allowedAddOnIds: selected.includes(id) ? selected.filter((item) => item !== id) : [...selected, id],
+    });
+  };
 
   return (
     <main className="secondary-page menu-page">
       <div className="page-heading menu-heading">
-        <div><p>商家数据</p><h1>菜品录入</h1></div>
-        <span>{dishes.length} 个菜品 · {addOns.length} 个加料</span>
+        <div><p>商家数据</p><h1>{mode === 'dishes' ? '菜品管理' : '小料库'}</h1></div>
+        <span>{dishes.length} 个菜品 · {addOns.length} 个小料</span>
       </div>
-      <div className="menu-mode" role="tablist" aria-label="菜单数据类型">
+      {!hideModeTabs && <div className="menu-mode" role="tablist" aria-label="菜单数据类型">
         <button type="button" role="tab" aria-selected={mode === 'dishes'} className={mode === 'dishes' ? 'is-active' : ''} onClick={() => changeMode('dishes')}>菜品 {dishes.length}</button>
-        <button type="button" role="tab" aria-selected={mode === 'addOns'} className={mode === 'addOns' ? 'is-active' : ''} onClick={() => changeMode('addOns')}>加料 {addOns.length}</button>
-      </div>
+        <button type="button" role="tab" aria-selected={mode === 'addOns'} className={mode === 'addOns' ? 'is-active' : ''} onClick={() => changeMode('addOns')}>小料 {addOns.length}</button>
+      </div>}
       <div className="menu-workspace">
         <section className="menu-editor" aria-labelledby="menu-editor-title">
           <div className="menu-section-heading">
-            <div><span>{editingId ? '正在编辑' : '新增录入'}</span><h2 id="menu-editor-title">{mode === 'dishes' ? '菜品资料' : '加料资料'}</h2></div>
+            <div><span>{editingId ? '正在编辑' : '新增录入'}</span><h2 id="menu-editor-title">{mode === 'dishes' ? '菜品资料' : '小料资料'}</h2></div>
             {editingId && <button type="button" onClick={() => resetForm()}>取消编辑</button>}
           </div>
           <form className="menu-form" onSubmit={submit}>
             {mode === 'dishes' && (
-              <label>分组<input value={form.group} onChange={(event) => setForm({ ...form, group: event.target.value })} placeholder="例如 锡纸系列" required /></label>
+              <label>品类<input list="dish-groups" value={form.group} onChange={(event) => setForm({ ...form, group: event.target.value })} placeholder="选择或输入品类" required /><datalist id="dish-groups">{groups.map((group) => <option value={group} key={group} />)}</datalist></label>
             )}
             <label>名称<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder={mode === 'dishes' ? '例如 锡纸花甲粉/面' : '例如 煎蛋'} required /></label>
+            <label>{mode === 'dishes' ? '基础价格（元）' : '小料价格（元）'}<input type="number" min="0" step="0.01" inputMode="decimal" value={form.price} onChange={(event) => setForm({ ...form, price: event.target.value })} placeholder="0.00" required /></label>
             {mode === 'dishes' && (
               <label>说明<input value={form.note} onChange={(event) => setForm({ ...form, note: event.target.value })} placeholder="例如 粉或面任选" /></label>
             )}
-            <label>价格（元）<input type="number" min="0" step="0.01" inputMode="decimal" value={form.price} onChange={(event) => setForm({ ...form, price: event.target.value })} placeholder="0.00" required /></label>
+            {mode === 'dishes' && (
+              <fieldset className="addon-library-picker">
+                <legend>可选小料 <span>{form.allowedAddOnIds?.length ?? 0} 项</span></legend>
+                <div>
+                  {addOns.map((item) => (
+                    <label key={item.id} className={!item.active ? 'is-inactive' : ''}>
+                      <input type="checkbox" checked={form.allowedAddOnIds?.includes(item.id) ?? false} onChange={() => toggleAllowedAddOn(item.id)} />
+                      <span><strong>{item.name}</strong><small>{formatPrice(item.priceCents)}</small></span>
+                    </label>
+                  ))}
+                  {!addOns.length && <p>请先在“小料库”中添加小料。</p>}
+                </div>
+              </fieldset>
+            )}
             <label className="menu-active-field"><input type="checkbox" checked={form.active} onChange={(event) => setForm({ ...form, active: event.target.checked })} /><span>录入后立即启用</span></label>
             <p className={`menu-message ${message.includes('已') ? 'is-success' : ''}`} aria-live="polite">{message}</p>
             <button type="submit" className="menu-save" disabled={status === 'saving'}>
-              {status === 'saving' ? '正在保存' : editingId ? '保存修改' : mode === 'dishes' ? '添加菜品' : '添加加料'}
+              {status === 'saving' ? '正在保存' : editingId ? '保存修改' : mode === 'dishes' ? '添加菜品' : '添加小料'}
             </button>
           </form>
         </section>
         <section className="menu-list-panel" aria-labelledby="menu-list-title">
-          <div className="menu-section-heading"><div><span>实时菜单</span><h2 id="menu-list-title">{mode === 'dishes' ? '全部菜品' : '全部加料'}</h2></div><strong>{items.filter((item) => item.active).length} 启用</strong></div>
+          <div className="menu-section-heading"><div><span>实时菜单</span><h2 id="menu-list-title">{mode === 'dishes' ? '全部菜品' : '全部小料'}</h2></div><strong>{items.filter((item) => item.active).length} 启用</strong></div>
           <div className="menu-list">
             {orderedItems.map((item) => (
               <article className={item.active ? '' : 'is-inactive'} key={item.id}>
@@ -850,6 +1040,7 @@ function MenuManagementView({ dishes, addOns }) {
                   {mode === 'dishes' && <small>{item.group}</small>}
                   <strong>{item.name}</strong>
                   {mode === 'dishes' && item.note && <span>{item.note}</span>}
+                  {mode === 'dishes' && <span>{item.allowedAddOnIds?.length ?? 0} 种可选小料</span>}
                 </div>
                 <b>{formatPrice(item.priceCents)}</b>
                 <button type="button" className="menu-status-button" disabled={status === 'saving'} onClick={() => toggleItem(item)}>{item.active ? '已启用' : '已停用'}</button>
@@ -922,7 +1113,7 @@ function SettingsView({ settings, status, onChange }) {
         <div className="plate-tools">
           <form onSubmit={regenerateNumbers}>
             <label htmlFor="plate-range">连续号牌</label>
-            <div><span>1 —</span><input id="plate-range" type="number" min="1" max="999" inputMode="numeric" value={rangeEnd} onChange={(event) => setRangeEnd(event.target.value)} disabled={status === 'saving'} /><button type="submit" disabled={status === 'saving'}>重新生成</button></div>
+            <div><span>1 至</span><input id="plate-range" type="number" min="1" max="999" inputMode="numeric" value={rangeEnd} onChange={(event) => setRangeEnd(event.target.value)} disabled={status === 'saving'} /><button type="submit" disabled={status === 'saving'}>重新生成</button></div>
             <small>会替换下方当前清单</small>
           </form>
           <form onSubmit={addNumber}>

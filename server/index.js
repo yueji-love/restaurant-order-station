@@ -13,6 +13,7 @@ import {
   readCookie,
   verifyPassword,
 } from './auth.js';
+import { buildAnalytics } from './analytics.js';
 import { loadStateFromDatabase, saveStateToDatabase } from './database.js';
 import { DEFAULT_ADD_ONS, DEFAULT_DISHES } from './menu-data.js';
 
@@ -38,6 +39,7 @@ function normalizeAvailableNumbers(value) {
 
 function normalizeDishes(value) {
   const source = Array.isArray(value) ? value : DEFAULT_DISHES;
+  const defaultAddOnIds = DEFAULT_ADD_ONS.map((item) => item.id);
   return source
     .filter((item) => item && typeof item.name === 'string' && item.name.trim())
     .map((item, index) => ({
@@ -49,6 +51,9 @@ function normalizeDishes(value) {
       active: item.active !== false,
       createdAt: typeof item.createdAt === 'string' ? item.createdAt : nowIso(),
       updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : nowIso(),
+      allowedAddOnIds: Array.isArray(item.allowedAddOnIds)
+        ? [...new Set(item.allowedAddOnIds.filter((id) => typeof id === 'string'))]
+        : [...defaultAddOnIds],
     }));
 }
 
@@ -77,6 +82,7 @@ const initialState = {
   },
   users: [],
   sessions: [],
+  history: [],
 };
 
 function readState() {
@@ -96,6 +102,7 @@ function readState() {
       sessions: Array.isArray(stored.sessions)
         ? stored.sessions.filter((item) => Date.parse(item.expiresAt) > Date.now())
         : [],
+      history: Array.isArray(stored.history) ? stored.history : [],
     };
   } catch (error) {
     console.error('无法读取数据文件，将使用初始状态。', error);
@@ -178,17 +185,27 @@ function closeSessionClients(tokenHashToClose) {
   });
 }
 
+function archiveOrder(order) {
+  const completedOrder = { ...order, status: 'completed', completedAt: nowIso() };
+  state.history.unshift(completedOrder);
+  return completedOrder;
+}
+
 function parseDish(body, existing = {}) {
   const group = body.group === undefined ? existing.group : body.group;
   const name = body.name === undefined ? existing.name : body.name;
   const note = body.note === undefined ? existing.note : body.note;
   const priceCents = body.priceCents === undefined ? existing.priceCents : body.priceCents;
   const active = body.active === undefined ? existing.active : body.active;
+  const allowedAddOnIds = body.allowedAddOnIds === undefined ? existing.allowedAddOnIds ?? [] : body.allowedAddOnIds;
   if (typeof group !== 'string' || !group.trim() || group.trim().length > 30) return null;
   if (typeof name !== 'string' || !name.trim() || name.trim().length > 60) return null;
   if (typeof note !== 'string' || note.trim().length > 100) return null;
   if (!Number.isInteger(priceCents) || priceCents < 0 || priceCents > 1_000_000) return null;
   if (typeof active !== 'boolean') return null;
+  if (!Array.isArray(allowedAddOnIds) || allowedAddOnIds.some((id) => typeof id !== 'string')) return null;
+  const uniqueAddOnIds = [...new Set(allowedAddOnIds)];
+  if (uniqueAddOnIds.some((id) => !state.addOns.some((item) => item.id === id))) return null;
   return {
     ...existing,
     group: group.trim(),
@@ -196,6 +213,7 @@ function parseDish(body, existing = {}) {
     note: note.trim(),
     priceCents,
     active,
+    allowedAddOnIds: uniqueAddOnIds,
     updatedAt: nowIso(),
   };
 }
@@ -292,6 +310,15 @@ app.get('/api/events', (request, response) => {
   });
 });
 
+app.get('/api/analytics', (request, response) => {
+  const from = Date.parse(request.query.from);
+  const to = Date.parse(request.query.to);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) {
+    return response.status(400).json({ message: '请选择有效的统计时间范围。' });
+  }
+  return response.json(buildAnalytics(state.history, from, to));
+});
+
 app.post('/api/orders', (request, response) => {
   const { number, dishId, addOnIds = [] } = request.body ?? {};
   if (!Number.isInteger(number) || number < 1 || number > 999 || typeof dishId !== 'string') {
@@ -312,6 +339,9 @@ app.post('/api/orders', (request, response) => {
   const selectedAddOns = uniqueAddOnIds.map((id) => state.addOns.find((item) => item.id === id && item.active));
   if (selectedAddOns.some((item) => !item)) {
     return response.status(409).json({ message: '部分加料已停用或删除，请重新选择。' });
+  }
+  if (uniqueAddOnIds.some((id) => !dish.allowedAddOnIds.includes(id))) {
+    return response.status(409).json({ message: '所选小料不适用于该菜品，请重新选择。' });
   }
 
   const order = {
@@ -349,7 +379,10 @@ app.patch('/api/orders/batch', (request, response) => {
   } else if (action === 'complete') {
     state.queue = state.queue.filter((item) => {
       const shouldComplete = item.category === category && item.status === 'making';
-      if (shouldComplete) updated += 1;
+      if (shouldComplete) {
+        updated += 1;
+        archiveOrder(item);
+      }
       return !shouldComplete;
     });
   } else {
@@ -368,7 +401,8 @@ app.patch('/api/orders/:id', (request, response) => {
   if (action === 'start') {
     state.queue[orderIndex] = { ...state.queue[orderIndex], status: 'making', startedAt: nowIso() };
   } else if (action === 'complete') {
-    state.queue.splice(orderIndex, 1);
+    const [completedOrder] = state.queue.splice(orderIndex, 1);
+    archiveOrder(completedOrder);
   } else {
     return response.status(400).json({ message: '不支持的出餐操作。' });
   }
@@ -435,7 +469,12 @@ app.patch('/api/add-ons/:id', (request, response) => {
 app.delete('/api/add-ons/:id', (request, response) => {
   const index = state.addOns.findIndex((item) => item.id === request.params.id);
   if (index === -1) return response.status(404).json({ message: '加料不存在。' });
-  state.addOns.splice(index, 1);
+  const [removed] = state.addOns.splice(index, 1);
+  state.dishes = state.dishes.map((dish) => ({
+    ...dish,
+    allowedAddOnIds: dish.allowedAddOnIds.filter((id) => id !== removed.id),
+    updatedAt: nowIso(),
+  }));
   broadcastState();
   return response.json({ ok: true });
 });
