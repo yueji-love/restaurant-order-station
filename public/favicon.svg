@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">餐厅点单台</title>
+  <rect width="512" height="512" fill="#17364b" />
+  <path d="M174 98c-30 38 30 55 0 94M256 82c-34 43 34 63 0 109M338 98c-30 38 30 55 0 94" fill="none" stroke="#f3ead8" stroke-linecap="round" stroke-width="24" />
+  <path d="M100 234h312c0 111-62 178-156 178S100 345 100 234Z" fill="#f7f4ed" />
+  <path d="M118 258h276c-10 25-24 46-42 62H160c-18-16-32-37-42-62Z" fill="#2c7a5b" />
+  <path d="M132 424h248" fill="none" stroke="#f3ead8" stroke-linecap="round" stroke-width="24" />
+</svg>
