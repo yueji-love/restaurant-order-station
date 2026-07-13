@@ -846,7 +846,6 @@ function DashboardView() {
   const summary = data?.summary ?? { revenueCents: 0, orderCount: 0, averageOrderCents: 0, addOnCount: 0 };
   return (
     <main className="secondary-page dashboard-page">
-      <div className="page-heading dashboard-heading"><div><p>历史经营数据</p><h1>数据看板</h1></div><span>按完成取餐时间统计</span></div>
       <div className="dashboard-filters" role="group" aria-label="统计时间">
         {[['today', '今天'], ['7', '近 7 天'], ['30', '近 30 天'], ['custom', '自定义']].map(([id, label]) => (
           <button type="button" className={preset === id ? 'is-active' : ''} key={id} onClick={() => setPreset(id)}>{label}</button>
@@ -866,15 +865,18 @@ function DashboardView() {
             <div><span>营业额</span><strong>{formatPrice(summary.revenueCents)}</strong></div>
             <div><span>完成订单</span><strong>{summary.orderCount}<small> 单</small></strong></div>
             <div><span>平均客单</span><strong>{formatPrice(summary.averageOrderCents)}</strong></div>
-            <div><span>售出小料</span><strong>{summary.addOnCount}<small> 份</small></strong></div>
           </section>
-          {summary.orderCount ? (
+          <section className="dashboard-sales" aria-labelledby="dish-sales-title">
+            <div className="dashboard-sales-heading">
+              <h1 id="dish-sales-title">菜品销售统计</h1>
+              <strong>{data.dishes.reduce((total, item) => total + item.count, 0)} 份</strong>
+            </div>
             <div className="dashboard-rankings">
-              <RankingList title="热销菜品" items={data.dishes} />
+              <RankingList title="菜品销量" items={data.dishes} emptyText="所选时间内暂无菜品销售" />
               <RankingList title="品类销量" items={data.categories} />
               <RankingList title="小料销量" items={data.addOns} emptyText="所选时间内没有售出小料" />
             </div>
-          ) : <div className="dashboard-empty"><ChartBar size={48} weight="thin" /><h2>这个时间段还没有完成订单</h2><p>订单完成取餐后，会自动进入历史统计。</p></div>}
+          </section>
         </>
       )}
     </main>
@@ -975,6 +977,13 @@ function MenuManagementView({ dishes, addOns, initialMode = 'dishes', hideModeTa
   const orderedItems = [...items].sort((a, b) => mode === 'dishes'
     ? a.group.localeCompare(b.group, 'zh-CN') || a.name.localeCompare(b.name, 'zh-CN')
     : a.name.localeCompare(b.name, 'zh-CN'));
+  const dishGroups = orderedItems.reduce((result, item) => {
+    const groupName = item.group?.trim() || '未分类';
+    const currentGroup = result[result.length - 1];
+    if (currentGroup?.name === groupName) currentGroup.items.push(item);
+    else result.push({ name: groupName, items: [item] });
+    return result;
+  }, []);
   const groups = [...new Set(dishes.map((item) => item.group))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
 
   const toggleAllowedAddOn = (id) => {
@@ -985,12 +994,24 @@ function MenuManagementView({ dishes, addOns, initialMode = 'dishes', hideModeTa
     });
   };
 
+  const renderMenuItem = (item) => (
+    <article className={item.active ? '' : 'is-inactive'} key={item.id}>
+      <div className="menu-item-copy">
+        <strong>{item.name}</strong>
+        {mode === 'dishes' && item.note && <span>{item.note}</span>}
+        {mode === 'dishes' && <span>{item.allowedAddOnIds?.length ?? 0} 种可选小料</span>}
+      </div>
+      <b>{formatPrice(item.priceCents)}</b>
+      <button type="button" className="menu-status-button" disabled={status === 'saving'} onClick={() => toggleItem(item)}>{item.active ? '已启用' : '已停用'}</button>
+      <div className="menu-item-actions">
+        <button type="button" onClick={() => editItem(item)} aria-label={`编辑 ${item.name}`}><PencilSimple size={18} /></button>
+        <button type="button" onClick={() => removeItem(item)} aria-label={`删除 ${item.name}`}><Trash size={18} /></button>
+      </div>
+    </article>
+  );
+
   return (
     <main className="secondary-page menu-page">
-      <div className="page-heading menu-heading">
-        <div><p>商家数据</p><h1>{mode === 'dishes' ? '菜品管理' : '小料库'}</h1></div>
-        <span>{dishes.length} 个菜品 · {addOns.length} 个小料</span>
-      </div>
       {!hideModeTabs && <div className="menu-mode" role="tablist" aria-label="菜单数据类型">
         <button type="button" role="tab" aria-selected={mode === 'dishes'} className={mode === 'dishes' ? 'is-active' : ''} onClick={() => changeMode('dishes')}>菜品 {dishes.length}</button>
         <button type="button" role="tab" aria-selected={mode === 'addOns'} className={mode === 'addOns' ? 'is-active' : ''} onClick={() => changeMode('addOns')}>小料 {addOns.length}</button>
@@ -1032,24 +1053,19 @@ function MenuManagementView({ dishes, addOns, initialMode = 'dishes', hideModeTa
           </form>
         </section>
         <section className="menu-list-panel" aria-labelledby="menu-list-title">
-          <div className="menu-section-heading"><div><span>实时菜单</span><h2 id="menu-list-title">{mode === 'dishes' ? '全部菜品' : '全部小料'}</h2></div><strong>{items.filter((item) => item.active).length} 启用</strong></div>
+          <div className="menu-section-heading"><div><span>{mode === 'dishes' ? '按品类显示' : '小料清单'}</span><h2 id="menu-list-title">{mode === 'dishes' ? '全部菜品' : '全部小料'}</h2></div><strong>{items.filter((item) => item.active).length} 启用</strong></div>
           <div className="menu-list">
-            {orderedItems.map((item) => (
-              <article className={item.active ? '' : 'is-inactive'} key={item.id}>
-                <div className="menu-item-copy">
-                  {mode === 'dishes' && <small>{item.group}</small>}
-                  <strong>{item.name}</strong>
-                  {mode === 'dishes' && item.note && <span>{item.note}</span>}
-                  {mode === 'dishes' && <span>{item.allowedAddOnIds?.length ?? 0} 种可选小料</span>}
-                </div>
-                <b>{formatPrice(item.priceCents)}</b>
-                <button type="button" className="menu-status-button" disabled={status === 'saving'} onClick={() => toggleItem(item)}>{item.active ? '已启用' : '已停用'}</button>
-                <div className="menu-item-actions">
-                  <button type="button" onClick={() => editItem(item)} aria-label={`编辑 ${item.name}`}><PencilSimple size={18} /></button>
-                  <button type="button" onClick={() => removeItem(item)} aria-label={`删除 ${item.name}`}><Trash size={18} /></button>
-                </div>
-              </article>
-            ))}
+            {mode === 'dishes'
+              ? dishGroups.map((group, groupIndex) => (
+                <section className="menu-category-group" key={group.name} aria-labelledby={`menu-category-${groupIndex}`}>
+                  <div className="menu-category-heading">
+                    <h3 id={`menu-category-${groupIndex}`}>{group.name}</h3>
+                    <span>{group.items.length} 个菜品</span>
+                  </div>
+                  {group.items.map(renderMenuItem)}
+                </section>
+              ))
+              : orderedItems.map(renderMenuItem)}
             {!orderedItems.length && <div className="menu-empty">还没有数据，从左侧开始录入。</div>}
           </div>
         </section>

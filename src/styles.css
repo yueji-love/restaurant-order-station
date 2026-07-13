@@ -1294,7 +1294,7 @@ button:active:not(:disabled) {
 
 .dashboard-metrics {
   display: grid;
-  grid-template-columns: 1.4fr repeat(3, 1fr);
+  grid-template-columns: 1.35fr 1fr 1fr;
   border-top: 1px solid var(--charcoal);
   border-bottom: 1px solid var(--line);
 }
@@ -1336,7 +1336,34 @@ button:active:not(:disabled) {
   display: grid;
   grid-template-columns: 1.3fr 1fr 1fr;
   gap: 28px;
-  margin-top: 38px;
+}
+
+.dashboard-sales {
+  margin-top: 44px;
+}
+
+.dashboard-sales-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--charcoal);
+}
+
+.dashboard-sales-heading h1 {
+  margin: 0;
+  font-size: clamp(26px, 3vw, 38px);
+  letter-spacing: -0.04em;
+}
+
+.dashboard-sales-heading strong {
+  color: var(--iris);
+  font-size: 18px;
+}
+
+.dashboard-sales .dashboard-rankings {
+  margin-top: 26px;
 }
 
 .ranking-panel h2 {
@@ -1444,6 +1471,31 @@ button:active:not(:disabled) {
   display: grid;
 }
 
+.menu-category-group + .menu-category-group {
+  margin-top: 28px;
+}
+
+.menu-category-heading {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--charcoal);
+}
+
+.menu-category-heading h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.menu-category-heading span {
+  color: var(--slate);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .menu-list article {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 80px 72px 74px;
@@ -1455,6 +1507,10 @@ button:active:not(:disabled) {
 }
 
 .menu-list article:first-child {
+  border-top: 0;
+}
+
+.menu-category-group article:first-of-type {
   border-top: 0;
 }
 
@@ -2093,7 +2149,7 @@ button:active:not(:disabled) {
   }
 
   .dashboard-metrics {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
   }
 
   .dashboard-metrics > div,
@@ -2102,11 +2158,7 @@ button:active:not(:disabled) {
     border-left: 0;
   }
 
-  .dashboard-metrics > div:nth-child(even) {
-    border-left: 1px solid var(--line);
-  }
-
-  .dashboard-metrics > div:nth-child(n + 3) {
+  .dashboard-metrics > div + div {
     border-top: 1px solid var(--line);
   }
 
