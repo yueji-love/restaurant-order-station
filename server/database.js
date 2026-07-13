@@ -45,6 +45,7 @@ database.exec(`
     note TEXT NOT NULL,
     price_cents INTEGER NOT NULL,
     active INTEGER NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   ) STRICT;
@@ -54,6 +55,7 @@ database.exec(`
     name TEXT NOT NULL,
     price_cents INTEGER NOT NULL,
     active INTEGER NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   ) STRICT;
@@ -74,6 +76,14 @@ const dishColumns = database.prepare('PRAGMA table_info(dishes)').all();
 if (!dishColumns.some((column) => column.name === 'allowed_add_on_ids_json')) {
   database.exec('ALTER TABLE dishes ADD COLUMN allowed_add_on_ids_json TEXT');
 }
+if (!dishColumns.some((column) => column.name === 'sort_order')) {
+  database.exec('ALTER TABLE dishes ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+}
+
+const addOnColumns = database.prepare('PRAGMA table_info(add_ons)').all();
+if (!addOnColumns.some((column) => column.name === 'sort_order')) {
+  database.exec('ALTER TABLE add_ons ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+}
 
 function parseJson(value, fallback) {
   try {
@@ -92,7 +102,7 @@ export function loadStateFromDatabase() {
   return {
     queue: database.prepare('SELECT data_json FROM orders ORDER BY rowid').all()
       .map((row) => parseJson(row.data_json, null)).filter(Boolean),
-    dishes: database.prepare('SELECT * FROM dishes ORDER BY created_at, rowid').all().map((row) => ({
+    dishes: database.prepare('SELECT * FROM dishes ORDER BY sort_order, created_at, rowid').all().map((row) => ({
       id: row.id,
       group: row.group_name,
       name: row.name,
@@ -105,7 +115,7 @@ export function loadStateFromDatabase() {
         ? undefined
         : parseJson(row.allowed_add_on_ids_json, []),
     })),
-    addOns: database.prepare('SELECT * FROM add_ons ORDER BY created_at, rowid').all().map((row) => ({
+    addOns: database.prepare('SELECT * FROM add_ons ORDER BY sort_order, created_at, rowid').all().map((row) => ({
       id: row.id,
       name: row.name,
       priceCents: row.price_cents,
@@ -144,12 +154,12 @@ export function saveStateToDatabase(state) {
     INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)
   `);
   const insertDish = database.prepare(`
-    INSERT INTO dishes (id, group_name, name, note, price_cents, active, created_at, updated_at, allowed_add_on_ids_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO dishes (id, group_name, name, note, price_cents, active, sort_order, created_at, updated_at, allowed_add_on_ids_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertAddOn = database.prepare(`
-    INSERT INTO add_ons (id, name, price_cents, active, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO add_ons (id, name, price_cents, active, sort_order, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
   const insertOrder = database.prepare('INSERT INTO orders (id, data_json) VALUES (?, ?)');
   const insertHistory = database.prepare('INSERT INTO order_history (id, completed_at, data_json) VALUES (?, ?, ?)');
@@ -164,11 +174,11 @@ export function saveStateToDatabase(state) {
     for (const session of state.sessions ?? []) {
       insertSession.run(session.tokenHash, session.userId, session.createdAt, session.expiresAt);
     }
-    for (const dish of state.dishes ?? []) {
-      insertDish.run(dish.id, dish.group, dish.name, dish.note ?? '', dish.priceCents, dish.active ? 1 : 0, dish.createdAt, dish.updatedAt, JSON.stringify(dish.allowedAddOnIds ?? []));
+    for (const [index, dish] of (state.dishes ?? []).entries()) {
+      insertDish.run(dish.id, dish.group, dish.name, dish.note ?? '', dish.priceCents, dish.active ? 1 : 0, index, dish.createdAt, dish.updatedAt, JSON.stringify(dish.allowedAddOnIds ?? []));
     }
-    for (const addOn of state.addOns ?? []) {
-      insertAddOn.run(addOn.id, addOn.name, addOn.priceCents, addOn.active ? 1 : 0, addOn.createdAt, addOn.updatedAt);
+    for (const [index, addOn] of (state.addOns ?? []).entries()) {
+      insertAddOn.run(addOn.id, addOn.name, addOn.priceCents, addOn.active ? 1 : 0, index, addOn.createdAt, addOn.updatedAt);
     }
     for (const order of state.queue ?? []) {
       insertOrder.run(order.id, JSON.stringify(order));

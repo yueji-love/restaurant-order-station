@@ -1030,7 +1030,7 @@ button:active:not(:disabled) {
 }
 
 .menu-page {
-  max-width: 1320px;
+  max-width: 1120px;
 }
 
 .menu-heading {
@@ -1082,7 +1082,7 @@ button:active:not(:disabled) {
 
 .menu-list-panel {
   min-width: 0;
-  padding: 22px;
+  padding: 26px 28px 32px;
 }
 
 .menu-section-heading {
@@ -1118,8 +1118,43 @@ button:active:not(:disabled) {
   font-size: 13px;
 }
 
+.menu-list-heading {
+  align-items: center;
+}
+
+.menu-list-tools {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.menu-list-tools > strong {
+  color: var(--slate);
+  font-size: 13px;
+}
+
+.menu-add-button {
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 15px;
+  border: 1px solid var(--charcoal);
+  border-radius: 8px;
+  color: #ffffff;
+  background: var(--charcoal);
+  font-weight: 750;
+  cursor: pointer;
+}
+
 .menu-form {
   display: grid;
+  gap: 16px;
+}
+
+.menu-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
 
@@ -1144,7 +1179,7 @@ button:active:not(:disabled) {
 
 .addon-library-picker > div {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -1457,6 +1492,21 @@ button:active:not(:disabled) {
   color: var(--success);
 }
 
+.menu-page-message {
+  margin: -8px 0 18px;
+  color: var(--danger);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.menu-page-message.is-success {
+  color: var(--success);
+}
+
+.menu-page-message:empty {
+  display: none;
+}
+
 .menu-save {
   min-height: 50px;
   border: 1px solid var(--charcoal);
@@ -1464,6 +1514,89 @@ button:active:not(:disabled) {
   color: #ffffff;
   background: var(--charcoal);
   font-weight: 750;
+  cursor: pointer;
+}
+
+.menu-dialog-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgb(25 25 27 / 42%);
+  backdrop-filter: blur(3px);
+}
+
+.menu-dialog {
+  width: min(760px, 100%);
+  max-height: calc(100dvh - 56px);
+  overflow: auto;
+  border: 1px solid #d6d6d9;
+  border-radius: 14px;
+  background: var(--canvas);
+  box-shadow: 0 24px 70px rgb(30 30 35 / 18%);
+}
+
+.menu-dialog--compact {
+  width: min(540px, 100%);
+}
+
+.menu-dialog-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 22px 24px 18px;
+  border-bottom: 1px solid var(--line);
+  background: rgb(255 255 255 / 97%);
+}
+
+.menu-dialog-header span {
+  color: var(--iris);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.menu-dialog-header h2 {
+  margin: 3px 0 0;
+  font-size: 24px;
+  letter-spacing: -0.03em;
+}
+
+.menu-dialog-header > button {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--slate);
+  background: var(--canvas);
+  cursor: pointer;
+}
+
+.menu-dialog .menu-form {
+  padding: 22px 24px 24px;
+}
+
+.menu-dialog-actions {
+  display: grid;
+  grid-template-columns: 1fr 1.5fr;
+  gap: 10px;
+}
+
+.menu-dialog-actions > button:first-child {
+  min-height: 50px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--slate);
+  background: var(--mist);
+  font-weight: 700;
   cursor: pointer;
 }
 
@@ -1498,7 +1631,7 @@ button:active:not(:disabled) {
 
 .menu-list article {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 80px 72px 74px;
+  grid-template-columns: 74px minmax(0, 1fr) 80px 72px 82px;
   gap: 14px;
   align-items: center;
   min-height: 86px;
@@ -1516,6 +1649,47 @@ button:active:not(:disabled) {
 
 .menu-list article.is-inactive {
   opacity: 0.52;
+}
+
+.menu-order-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.menu-order-cell > span {
+  width: 20px;
+  color: var(--ash);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.menu-order-cell > div {
+  display: grid;
+  grid-template-columns: repeat(2, 25px);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.menu-order-cell button {
+  display: grid;
+  width: 25px;
+  height: 28px;
+  place-items: center;
+  border: 0;
+  color: var(--slate);
+  background: var(--canvas);
+  cursor: pointer;
+}
+
+.menu-order-cell button + button {
+  border-left: 1px solid var(--line);
+}
+
+.menu-order-cell button:disabled {
+  color: #c8c8cc;
+  cursor: default;
 }
 
 .menu-item-copy {
@@ -2116,11 +2290,81 @@ button:active:not(:disabled) {
     padding: 30px 16px 60px;
   }
 
+  .menu-list-panel {
+    padding: 20px 18px 26px;
+  }
+
+  .menu-list-heading {
+    align-items: flex-start;
+  }
+
+  .menu-list-tools {
+    display: grid;
+    justify-items: end;
+    gap: 8px;
+  }
+
+  .menu-add-button {
+    min-height: 40px;
+    padding: 0 12px;
+  }
+
   .menu-list article {
-    grid-template-columns: minmax(0, 1fr) 62px 64px;
+    grid-template-columns: 58px minmax(0, 1fr) auto;
+    gap: 10px;
+    padding: 15px 0;
+  }
+
+  .menu-order-cell {
+    grid-row: 1 / span 2;
+    grid-column: 1;
+  }
+
+  .menu-order-cell > span {
+    display: none;
+  }
+
+  .menu-item-copy {
+    grid-row: 1;
+    grid-column: 2;
+  }
+
+  .menu-list article > b {
+    grid-row: 1;
+    grid-column: 3;
+  }
+
+  .menu-status-button {
+    grid-row: 2;
+    grid-column: 2;
+    width: fit-content;
+    min-height: 30px;
+    padding: 0 10px;
   }
 
   .addon-library-picker > div {
+    grid-template-columns: 1fr;
+  }
+
+  .menu-dialog-layer {
+    align-items: end;
+    padding: 10px;
+  }
+
+  .menu-dialog {
+    max-height: calc(100dvh - 20px);
+    border-radius: 12px;
+  }
+
+  .menu-dialog-header {
+    padding: 18px 18px 14px;
+  }
+
+  .menu-dialog .menu-form {
+    padding: 18px;
+  }
+
+  .menu-form-grid {
     grid-template-columns: 1fr;
   }
 
@@ -2176,8 +2420,9 @@ button:active:not(:disabled) {
   }
 
   .menu-item-actions {
-    grid-column: 1 / -1;
-    justify-content: flex-start;
+    grid-row: 2;
+    grid-column: 3;
+    justify-content: flex-end;
   }
 
   .page-heading {

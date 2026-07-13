@@ -228,6 +228,14 @@ function parseAddOn(body, existing = {}) {
   return { ...existing, name: name.trim(), priceCents, active, updatedAt: nowIso() };
 }
 
+function reorderItems(items, ids) {
+  if (!Array.isArray(ids) || ids.length !== items.length || ids.some((id) => typeof id !== 'string')) return null;
+  const requestedIds = new Set(ids);
+  if (requestedIds.size !== items.length || items.some((item) => !requestedIds.has(item.id))) return null;
+  const itemsById = new Map(items.map((item) => [item.id, item]));
+  return ids.map((id) => itemsById.get(id));
+}
+
 const app = express();
 app.disable('x-powered-by');
 app.use(express.json({ limit: '64kb' }));
@@ -422,6 +430,14 @@ app.post('/api/dishes', (request, response) => {
   return response.status(201).json(created);
 });
 
+app.put('/api/dishes/order', (request, response) => {
+  const reordered = reorderItems(state.dishes, request.body?.ids);
+  if (!reordered) return response.status(400).json({ message: '菜品顺序无效，请刷新后重试。' });
+  state.dishes = reordered;
+  broadcastState();
+  return response.json({ ok: true });
+});
+
 app.patch('/api/dishes/:id', (request, response) => {
   const index = state.dishes.findIndex((item) => item.id === request.params.id);
   if (index === -1) return response.status(404).json({ message: '菜品不存在。' });
@@ -452,6 +468,14 @@ app.post('/api/add-ons', (request, response) => {
   state.addOns.push(created);
   broadcastState();
   return response.status(201).json(created);
+});
+
+app.put('/api/add-ons/order', (request, response) => {
+  const reordered = reorderItems(state.addOns, request.body?.ids);
+  if (!reordered) return response.status(400).json({ message: '小料顺序无效，请刷新后重试。' });
+  state.addOns = reordered;
+  broadcastState();
+  return response.json({ ok: true });
 });
 
 app.patch('/api/add-ons/:id', (request, response) => {

@@ -4,6 +4,8 @@ import {
   ArrowRight,
   ChartBar,
   Check,
+  CaretDown,
+  CaretUp,
   ClipboardText,
   CookingPot,
   ForkKnife,
@@ -29,6 +31,8 @@ import {
   loginUser,
   logoutUser,
   registerUser,
+  reorderAddOns,
+  reorderDishes,
   saveSettings,
   subscribeToState,
   updateAddOn,
@@ -894,21 +898,48 @@ function RankingList({ title, items = [], emptyText = '暂无数据' }) {
 
 function MenuManagementView({ dishes, addOns, initialMode = 'dishes', hideModeTabs = false }) {
   const [mode, setMode] = useState(initialMode);
+  const [editorOpen, setEditorOpen] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(EMPTY_DISH_FORM);
   const [status, setStatus] = useState('idle');
   const [message, setMessage] = useState('');
   const items = mode === 'dishes' ? dishes : addOns;
 
-  const resetForm = (nextMode = mode) => {
+  useEffect(() => {
+    if (!editorOpen) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape' && status !== 'saving') {
+        setEditorOpen(false);
+        setEditingId(null);
+        setMessage('');
+      }
+    };
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [editorOpen, status]);
+
+  const resetForm = (nextMode = mode, closeEditor = true) => {
     setEditingId(null);
     setForm(nextMode === 'dishes' ? EMPTY_DISH_FORM : EMPTY_ADD_ON_FORM);
     setMessage('');
+    if (closeEditor) setEditorOpen(false);
   };
 
   const changeMode = (nextMode) => {
     setMode(nextMode);
     resetForm(nextMode);
+  };
+
+  const createItem = () => {
+    setEditingId(null);
+    setForm(mode === 'dishes' ? EMPTY_DISH_FORM : EMPTY_ADD_ON_FORM);
+    setMessage('');
+    setEditorOpen(true);
   };
 
   const editItem = (item) => {
@@ -917,6 +948,7 @@ function MenuManagementView({ dishes, addOns, initialMode = 'dishes', hideModeTa
       ? { group: item.group, name: item.name, note: item.note, price: String(item.priceCents / 100), active: item.active, allowedAddOnIds: item.allowedAddOnIds ?? [] }
       : { name: item.name, price: String(item.priceCents / 100), active: item.active });
     setMessage('');
+    setEditorOpen(true);
   };
 
   const submit = async (event) => {
@@ -931,12 +963,14 @@ function MenuManagementView({ dishes, addOns, initialMode = 'dishes', hideModeTa
     setStatus('saving');
     setMessage('');
     try {
+      const wasEditing = Boolean(editingId);
       if (mode === 'dishes') {
         if (editingId) await updateDish(editingId, payload);
         else await createDish(payload);
       } else if (editingId) await updateAddOn(editingId, payload);
       else await createAddOn(payload);
-      setMessage(editingId ? '修改已保存。' : '已加入菜单。');
+      setMessage(wasEditing ? '修改已保存。' : '已加入菜单。');
+      setEditorOpen(false);
       setEditingId(null);
       setForm(mode === 'dishes' ? EMPTY_DISH_FORM : EMPTY_ADD_ON_FORM);
     } catch (error) {
@@ -966,7 +1000,7 @@ function MenuManagementView({ dishes, addOns, initialMode = 'dishes', hideModeTa
     try {
       if (mode === 'dishes') await deleteDish(item.id);
       else await deleteAddOn(item.id);
-      if (editingId === item.id) resetForm();
+      setMessage('已删除。');
     } catch (error) {
       setMessage(error.message);
     } finally {
@@ -974,17 +1008,15 @@ function MenuManagementView({ dishes, addOns, initialMode = 'dishes', hideModeTa
     }
   };
 
-  const orderedItems = [...items].sort((a, b) => mode === 'dishes'
-    ? a.group.localeCompare(b.group, 'zh-CN') || a.name.localeCompare(b.name, 'zh-CN')
-    : a.name.localeCompare(b.name, 'zh-CN'));
+  const orderedItems = [...items];
   const dishGroups = orderedItems.reduce((result, item) => {
     const groupName = item.group?.trim() || '未分类';
-    const currentGroup = result[result.length - 1];
-    if (currentGroup?.name === groupName) currentGroup.items.push(item);
+    const currentGroup = result.find((group) => group.name === groupName);
+    if (currentGroup) currentGroup.items.push(item);
     else result.push({ name: groupName, items: [item] });
     return result;
   }, []);
-  const groups = [...new Set(dishes.map((item) => item.group))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  const groups = [...new Set(dishes.map((item) => item.group))];
 
   const toggleAllowedAddOn = (id) => {
     const selected = form.allowedAddOnIds ?? [];
@@ -994,8 +1026,36 @@ function MenuManagementView({ dishes, addOns, initialMode = 'dishes', hideModeTa
     });
   };
 
-  const renderMenuItem = (item) => (
+  const moveItem = async (item, direction, scopedItems) => {
+    const position = scopedItems.findIndex((candidate) => candidate.id === item.id);
+    const target = scopedItems[position + direction];
+    if (!target) return;
+    const nextItems = [...items];
+    const sourceIndex = nextItems.findIndex((candidate) => candidate.id === item.id);
+    const targetIndex = nextItems.findIndex((candidate) => candidate.id === target.id);
+    [nextItems[sourceIndex], nextItems[targetIndex]] = [nextItems[targetIndex], nextItems[sourceIndex]];
+    setStatus('saving');
+    setMessage('');
+    try {
+      if (mode === 'dishes') await reorderDishes(nextItems.map((candidate) => candidate.id));
+      else await reorderAddOns(nextItems.map((candidate) => candidate.id));
+      setMessage('顺序已保存。');
+    } catch (error) {
+      setMessage(error.message);
+    } finally {
+      setStatus('idle');
+    }
+  };
+
+  const renderMenuItem = (item, index, scopedItems) => (
     <article className={item.active ? '' : 'is-inactive'} key={item.id}>
+      <div className="menu-order-cell">
+        <span>{String(index + 1).padStart(2, '0')}</span>
+        <div>
+          <button type="button" disabled={status === 'saving' || index === 0} onClick={() => moveItem(item, -1, scopedItems)} aria-label={`上移 ${item.name}`}><CaretUp size={15} weight="bold" /></button>
+          <button type="button" disabled={status === 'saving' || index === scopedItems.length - 1} onClick={() => moveItem(item, 1, scopedItems)} aria-label={`下移 ${item.name}`}><CaretDown size={15} weight="bold" /></button>
+        </div>
+      </div>
       <div className="menu-item-copy">
         <strong>{item.name}</strong>
         {mode === 'dishes' && item.note && <span>{item.note}</span>}
@@ -1016,60 +1076,72 @@ function MenuManagementView({ dishes, addOns, initialMode = 'dishes', hideModeTa
         <button type="button" role="tab" aria-selected={mode === 'dishes'} className={mode === 'dishes' ? 'is-active' : ''} onClick={() => changeMode('dishes')}>菜品 {dishes.length}</button>
         <button type="button" role="tab" aria-selected={mode === 'addOns'} className={mode === 'addOns' ? 'is-active' : ''} onClick={() => changeMode('addOns')}>小料 {addOns.length}</button>
       </div>}
-      <div className="menu-workspace">
-        <section className="menu-editor" aria-labelledby="menu-editor-title">
-          <div className="menu-section-heading">
-            <div><span>{editingId ? '正在编辑' : '新增录入'}</span><h2 id="menu-editor-title">{mode === 'dishes' ? '菜品资料' : '小料资料'}</h2></div>
-            {editingId && <button type="button" onClick={() => resetForm()}>取消编辑</button>}
+      <section className="menu-list-panel" aria-labelledby="menu-list-title">
+        <div className="menu-section-heading menu-list-heading">
+          <div><span>{mode === 'dishes' ? '按品类显示' : '小料清单'}</span><h2 id="menu-list-title">{mode === 'dishes' ? '全部菜品' : '全部小料'}</h2></div>
+          <div className="menu-list-tools">
+            <strong>{items.filter((item) => item.active).length} 启用</strong>
+            <button type="button" className="menu-add-button" onClick={createItem}><Plus size={18} weight="bold" />新增{mode === 'dishes' ? '菜品' : '小料'}</button>
           </div>
-          <form className="menu-form" onSubmit={submit}>
-            {mode === 'dishes' && (
-              <label>品类<input list="dish-groups" value={form.group} onChange={(event) => setForm({ ...form, group: event.target.value })} placeholder="选择或输入品类" required /><datalist id="dish-groups">{groups.map((group) => <option value={group} key={group} />)}</datalist></label>
-            )}
-            <label>名称<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder={mode === 'dishes' ? '例如 锡纸花甲粉/面' : '例如 煎蛋'} required /></label>
-            <label>{mode === 'dishes' ? '基础价格（元）' : '小料价格（元）'}<input type="number" min="0" step="0.01" inputMode="decimal" value={form.price} onChange={(event) => setForm({ ...form, price: event.target.value })} placeholder="0.00" required /></label>
-            {mode === 'dishes' && (
-              <label>说明<input value={form.note} onChange={(event) => setForm({ ...form, note: event.target.value })} placeholder="例如 粉或面任选" /></label>
-            )}
-            {mode === 'dishes' && (
-              <fieldset className="addon-library-picker">
-                <legend>可选小料 <span>{form.allowedAddOnIds?.length ?? 0} 项</span></legend>
-                <div>
-                  {addOns.map((item) => (
-                    <label key={item.id} className={!item.active ? 'is-inactive' : ''}>
-                      <input type="checkbox" checked={form.allowedAddOnIds?.includes(item.id) ?? false} onChange={() => toggleAllowedAddOn(item.id)} />
-                      <span><strong>{item.name}</strong><small>{formatPrice(item.priceCents)}</small></span>
-                    </label>
-                  ))}
-                  {!addOns.length && <p>请先在“小料库”中添加小料。</p>}
+        </div>
+        {!editorOpen && <p className={`menu-page-message ${message.includes('已') ? 'is-success' : ''}`} aria-live="polite">{message}</p>}
+        <div className="menu-list">
+          {mode === 'dishes'
+            ? dishGroups.map((group, groupIndex) => (
+              <section className="menu-category-group" key={group.name} aria-labelledby={`menu-category-${groupIndex}`}>
+                <div className="menu-category-heading">
+                  <h3 id={`menu-category-${groupIndex}`}>{group.name}</h3>
+                  <span>{group.items.length} 个菜品</span>
                 </div>
-              </fieldset>
-            )}
-            <label className="menu-active-field"><input type="checkbox" checked={form.active} onChange={(event) => setForm({ ...form, active: event.target.checked })} /><span>录入后立即启用</span></label>
-            <p className={`menu-message ${message.includes('已') ? 'is-success' : ''}`} aria-live="polite">{message}</p>
-            <button type="submit" className="menu-save" disabled={status === 'saving'}>
-              {status === 'saving' ? '正在保存' : editingId ? '保存修改' : mode === 'dishes' ? '添加菜品' : '添加小料'}
-            </button>
-          </form>
-        </section>
-        <section className="menu-list-panel" aria-labelledby="menu-list-title">
-          <div className="menu-section-heading"><div><span>{mode === 'dishes' ? '按品类显示' : '小料清单'}</span><h2 id="menu-list-title">{mode === 'dishes' ? '全部菜品' : '全部小料'}</h2></div><strong>{items.filter((item) => item.active).length} 启用</strong></div>
-          <div className="menu-list">
-            {mode === 'dishes'
-              ? dishGroups.map((group, groupIndex) => (
-                <section className="menu-category-group" key={group.name} aria-labelledby={`menu-category-${groupIndex}`}>
-                  <div className="menu-category-heading">
-                    <h3 id={`menu-category-${groupIndex}`}>{group.name}</h3>
-                    <span>{group.items.length} 个菜品</span>
+                {group.items.map((item, index) => renderMenuItem(item, index, group.items))}
+              </section>
+            ))
+            : orderedItems.map((item, index) => renderMenuItem(item, index, orderedItems))}
+          {!orderedItems.length && <div className="menu-empty">还没有数据，点击右上角新增。</div>}
+        </div>
+      </section>
+      {editorOpen && (
+        <div className="menu-dialog-layer" onMouseDown={() => status !== 'saving' && resetForm()}>
+          <section className={`menu-dialog ${mode === 'addOns' ? 'menu-dialog--compact' : ''}`} role="dialog" aria-modal="true" aria-labelledby="menu-editor-title" onMouseDown={(event) => event.stopPropagation()}>
+            <header className="menu-dialog-header">
+              <div><span>{editingId ? '编辑' : '新增'}</span><h2 id="menu-editor-title">{mode === 'dishes' ? '菜品资料' : '小料资料'}</h2></div>
+              <button type="button" disabled={status === 'saving'} onClick={() => resetForm()} aria-label="关闭编辑窗口"><X size={20} /></button>
+            </header>
+            <form className="menu-form" onSubmit={submit}>
+              <div className="menu-form-grid">
+                {mode === 'dishes' && (
+                  <label>品类<input autoFocus list="dish-groups" value={form.group} onChange={(event) => setForm({ ...form, group: event.target.value })} placeholder="选择或输入品类" required /><datalist id="dish-groups">{groups.map((group) => <option value={group} key={group} />)}</datalist></label>
+                )}
+                <label>名称<input autoFocus={mode === 'addOns'} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder={mode === 'dishes' ? '例如 锡纸花甲粉/面' : '例如 煎蛋'} required /></label>
+                <label>{mode === 'dishes' ? '基础价格（元）' : '小料价格（元）'}<input type="number" min="0" step="0.01" inputMode="decimal" value={form.price} onChange={(event) => setForm({ ...form, price: event.target.value })} placeholder="0.00" required /></label>
+                {mode === 'dishes' && (
+                  <label>说明<input value={form.note} onChange={(event) => setForm({ ...form, note: event.target.value })} placeholder="例如 粉或面任选" /></label>
+                )}
+              </div>
+              {mode === 'dishes' && (
+                <fieldset className="addon-library-picker">
+                  <legend>可选小料 <span>{form.allowedAddOnIds?.length ?? 0} 项</span></legend>
+                  <div>
+                    {addOns.map((item) => (
+                      <label key={item.id} className={!item.active ? 'is-inactive' : ''}>
+                        <input type="checkbox" checked={form.allowedAddOnIds?.includes(item.id) ?? false} onChange={() => toggleAllowedAddOn(item.id)} />
+                        <span><strong>{item.name}</strong><small>{formatPrice(item.priceCents)}</small></span>
+                      </label>
+                    ))}
+                    {!addOns.length && <p>请先在“小料库”中添加小料。</p>}
                   </div>
-                  {group.items.map(renderMenuItem)}
-                </section>
-              ))
-              : orderedItems.map(renderMenuItem)}
-            {!orderedItems.length && <div className="menu-empty">还没有数据，从左侧开始录入。</div>}
-          </div>
-        </section>
-      </div>
+                </fieldset>
+              )}
+              <label className="menu-active-field"><input type="checkbox" checked={form.active} onChange={(event) => setForm({ ...form, active: event.target.checked })} /><span>{editingId ? '当前启用' : '录入后立即启用'}</span></label>
+              <p className={`menu-message ${message.includes('已') ? 'is-success' : ''}`} aria-live="polite">{message}</p>
+              <footer className="menu-dialog-actions">
+                <button type="button" disabled={status === 'saving'} onClick={() => resetForm()}>取消</button>
+                <button type="submit" className="menu-save" disabled={status === 'saving'}>{status === 'saving' ? '正在保存' : editingId ? '保存修改' : `添加${mode === 'dishes' ? '菜品' : '小料'}`}</button>
+              </footer>
+            </form>
+          </section>
+        </div>
+      )}
     </main>
   );
 }

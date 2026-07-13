@@ -96,6 +96,14 @@ export function deleteDish(id) {
   return request(`/api/dishes/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
+export function reorderDishes(ids) {
+  return request('/api/dishes/order', {
+    method: 'PUT',
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ ids }),
+  });
+}
+
 export function createAddOn(addOn) {
   return request('/api/add-ons', {
     method: 'POST',
@@ -114,6 +122,14 @@ export function updateAddOn(id, patch) {
 
 export function deleteAddOn(id) {
   return request(`/api/add-ons/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export function reorderAddOns(ids) {
+  return request('/api/add-ons/order', {
+    method: 'PUT',
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ ids }),
+  });
 }
 
 export function subscribeToState({ onState, onOpen, onError }) {
