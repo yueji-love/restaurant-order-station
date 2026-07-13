@@ -2,6 +2,9 @@
 
 面向餐厅前台与出餐员工的响应式点单工作台。
 
+- Gitee：`https://gitee.com/yuejilove/restaurant-order-station.git`
+- GitHub：`https://github.com/yueji-love/restaurant-order-station.git`
+
 ## 本地运行
 
 ```bash
@@ -52,3 +55,5 @@ npm run generate:pwa-icons
 - 键盘焦点、语义化控件和减少动态效果支持
 
 视觉意向图位于 `design-reference/order-entry-concept.png`，完整设计令牌和交互规则位于 `DESIGN.md`。
+
+腾讯云 Ubuntu + Docker 的完整生产部署步骤见 [`DEPLOY_TENCENT_CLOUD.md`](./DEPLOY_TENCENT_CLOUD.md)。

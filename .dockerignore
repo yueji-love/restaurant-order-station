@@ -1,0 +1,15 @@
+.git
+.github
+.gitee
+.agents
+.playwright-cli
+node_modules
+dist
+output
+coverage
+*.log
+server/data
+data
+design-reference
+specs
+风格参考design.md
