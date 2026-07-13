@@ -6,3 +6,5 @@ coverage/
 *.log
 .playwright-cli/
 output/
+server/data/store.json
+server/data/store.json.tmp

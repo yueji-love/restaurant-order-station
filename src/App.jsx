@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -10,6 +10,13 @@ import {
   SlidersHorizontal,
   Trash,
 } from '@phosphor-icons/react';
+import {
+  createOrder,
+  getState,
+  saveSettings,
+  subscribeToState,
+  updateOrder,
+} from './api.js';
 
 const STEPS = ['选号码', '选品类', '选小料', '确认'];
 const UNAVAILABLE_NUMBERS = new Set([3, 11, 21, 28]);
@@ -29,11 +36,24 @@ const EXTRAS = [
   { name: '少饭', note: '减少三分之一' },
   { name: '不要蒜', note: '制作时留意' },
 ];
-const INITIAL_QUEUE = [
-  { id: 1, number: 12, category: '双拼饭', extras: ['加辣'], status: 'waiting', minutes: 3 },
-  { id: 2, number: 7, category: '砂锅米线', extras: ['不要蒜'], status: 'making', minutes: 7 },
-  { id: 3, number: 23, category: '鸡腿饭', extras: [], status: 'ready', minutes: 9 },
-];
+const DEFAULT_SETTINGS = { sortMode: 'time', sound: true };
+
+function playOrderSound() {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return;
+  const context = new AudioContextClass();
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  oscillator.frequency.setValueAtTime(740, context.currentTime);
+  gain.gain.setValueAtTime(0.0001, context.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.12, context.currentTime + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.18);
+  oscillator.connect(gain);
+  gain.connect(context.destination);
+  oscillator.start();
+  oscillator.stop(context.currentTime + 0.2);
+  oscillator.addEventListener('ended', () => context.close());
+}
 
 function App() {
   const [view, setView] = useState('order');
@@ -41,9 +61,53 @@ function App() {
   const [number, setNumber] = useState(null);
   const [category, setCategory] = useState(null);
   const [extras, setExtras] = useState([]);
-  const [queue, setQueue] = useState(INITIAL_QUEUE);
+  const [queue, setQueue] = useState([]);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [syncStatus, setSyncStatus] = useState('connecting');
+  const [settingsStatus, setSettingsStatus] = useState('idle');
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [submitError, setSubmitError] = useState('');
+  const queueCount = useRef(0);
+  const queueInitialized = useRef(false);
+
+  useEffect(() => {
+    let active = true;
+    getState()
+      .then((state) => {
+        if (!active) return;
+        setQueue(state.queue);
+        setSettings(state.settings);
+      })
+      .catch(() => {
+        if (active) setSyncStatus('error');
+      });
+
+    const unsubscribe = subscribeToState({
+      onState: (state) => {
+        if (!active) return;
+        setQueue(state.queue);
+        setSettings(state.settings);
+      },
+      onOpen: () => active && setSyncStatus('connected'),
+      onError: () => active && setSyncStatus('error'),
+    });
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!queueInitialized.current) {
+      queueCount.current = queue.length;
+      queueInitialized.current = true;
+      return;
+    }
+    if (settings.sound && queue.length > queueCount.current) playOrderSound();
+    queueCount.current = queue.length;
+  }, [queue, settings.sound]);
 
   const resetOrder = () => {
     setStep(0);
@@ -52,38 +116,59 @@ function App() {
     setExtras([]);
     setSubmitting(false);
     setSuccess(false);
+    setSubmitError('');
+  };
+
+  const selectNumber = (nextNumber) => {
+    setNumber(nextNumber);
+    setStep(1);
   };
 
   const next = () => {
-    if (step === 0 && number) setStep(1);
     if (step === 1 && category) setStep(2);
     if (step === 2) setStep(3);
   };
 
-  const submitOrder = () => {
+  const submitOrder = async () => {
     if (!number || !category || submitting) return;
     setSubmitting(true);
-    window.setTimeout(() => {
-      setQueue((current) => [
-        ...current,
-        {
-          id: Date.now(),
-          number,
-          category: category.name,
-          extras,
-          status: 'waiting',
-          minutes: 0,
-        },
-      ]);
+    setSubmitError('');
+    try {
+      await createOrder({ number, category: category.name, extras });
       setSubmitting(false);
       setSuccess(true);
       window.setTimeout(resetOrder, 1200);
-    }, 650);
+    } catch (error) {
+      setSubmitting(false);
+      setSubmitError(error.message);
+    }
+  };
+
+  const changeSettings = async (patch) => {
+    const previous = settings;
+    const next = { ...settings, ...patch };
+    setSettings(next);
+    setSettingsStatus('saving');
+    try {
+      await saveSettings(patch);
+      setSettingsStatus('saved');
+    } catch {
+      setSettings(previous);
+      setSettingsStatus('error');
+    }
+  };
+
+  const changeOrderStatus = async (id, action) => {
+    try {
+      await updateOrder(id, action);
+    } catch {
+      setSyncStatus('error');
+    }
   };
 
   return (
     <div className="app-shell">
-      <Header view={view} onViewChange={setView} />
+      <Header view={view} syncStatus={syncStatus} onViewChange={setView} />
       {view === 'order' && (
         <OrderView
           step={step}
@@ -92,8 +177,9 @@ function App() {
           extras={extras}
           submitting={submitting}
           success={success}
+          submitError={submitError}
           onStepBack={() => setStep((current) => Math.max(0, current - 1))}
-          onNumberChange={setNumber}
+          onNumberChange={selectNumber}
           onCategoryChange={setCategory}
           onExtrasChange={setExtras}
           onNext={next}
@@ -101,13 +187,17 @@ function App() {
           onReset={resetOrder}
         />
       )}
-      {view === 'kitchen' && <KitchenView queue={queue} onQueueChange={setQueue} />}
-      {view === 'settings' && <SettingsView />}
+      {view === 'kitchen' && (
+        <KitchenView queue={queue} settings={settings} syncStatus={syncStatus} onOrderAction={changeOrderStatus} />
+      )}
+      {view === 'settings' && (
+        <SettingsView settings={settings} status={settingsStatus} onChange={changeSettings} />
+      )}
     </div>
   );
 }
 
-function Header({ view, onViewChange }) {
+function Header({ view, syncStatus, onViewChange }) {
   const items = [
     { id: 'order', label: '点单', Icon: ClipboardText },
     { id: 'kitchen', label: '出餐', Icon: CookingPot },
@@ -133,7 +223,9 @@ function Header({ view, onViewChange }) {
           </button>
         ))}
       </nav>
-      <div className="topbar__shift">午市</div>
+      <div className={`topbar__shift ${syncStatus === 'error' ? 'is-error' : ''}`}>
+        {syncStatus === 'connected' ? '实时同步' : '正在重连'}
+      </div>
     </header>
   );
 }
@@ -145,6 +237,7 @@ function OrderView({
   extras,
   submitting,
   success,
+  submitError,
   onStepBack,
   onNumberChange,
   onCategoryChange,
@@ -191,6 +284,7 @@ function OrderView({
         extras={extras}
         submitting={submitting}
         success={success}
+        submitError={submitError}
         onNext={onNext}
         onSubmit={onSubmit}
         onReset={onReset}
@@ -361,9 +455,9 @@ function OrderSummary({ number, category, extras }) {
   );
 }
 
-function ActionBar({ step, number, category, extras, submitting, success, onNext, onSubmit, onReset }) {
-  const canContinue = step === 0 ? Boolean(number) : step === 1 ? Boolean(category) : true;
-  const labels = ['下一步  选品类', '下一步  选小料', '下一步  确认', '确认下单'];
+function ActionBar({ step, number, category, extras, submitting, success, submitError, onNext, onSubmit, onReset }) {
+  const canContinue = step === 0 ? false : step === 1 ? Boolean(category) : true;
+  const labels = ['请选择号码', '下一步  选小料', '下一步  确认', '确认下单'];
   const summary = [
     number ? `${number}号` : null,
     category?.name,
@@ -376,7 +470,9 @@ function ActionBar({ step, number, category, extras, submitting, success, onNext
         <Trash size={20} aria-hidden="true" />
         清空选择
       </button>
-      <div className="action-bar__summary" aria-live="polite">{summary || '请选择号码开始点单'}</div>
+      <div className={`action-bar__summary ${submitError ? 'is-error' : ''}`} aria-live="polite">
+        {submitError || summary || '选择号码后自动进入下一步'}
+      </div>
       <button
         type="button"
         className={`primary-button ${success ? 'is-success' : ''}`}
@@ -395,31 +491,39 @@ function ActionBar({ step, number, category, extras, submitting, success, onNext
   );
 }
 
-function KitchenView({ queue, onQueueChange }) {
+function KitchenView({ queue, settings, syncStatus, onOrderAction }) {
+  const [pendingId, setPendingId] = useState(null);
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const orderedQueue = useMemo(
-    () => [...queue].sort((a, b) => a.id - b.id),
-    [queue],
+    () => [...queue].sort((a, b) => {
+      if (settings.sortMode === 'category') {
+        return a.category.localeCompare(b.category, 'zh-CN') || Date.parse(a.createdAt) - Date.parse(b.createdAt);
+      }
+      return Date.parse(a.createdAt) - Date.parse(b.createdAt);
+    }),
+    [queue, settings.sortMode],
   );
 
-  const advance = (id) => {
-    onQueueChange((current) => current.map((item) => {
-      if (item.id !== id) return item;
-      if (item.status === 'waiting') return { ...item, status: 'making' };
-      if (item.status === 'making') return { ...item, status: 'ready' };
-      return item;
-    }));
+  const actOnOrder = async (item) => {
+    setPendingId(item.id);
+    await onOrderAction(item.id, item.status === 'waiting' ? 'start' : 'complete');
+    setPendingId(null);
   };
-
-  const remove = (id) => onQueueChange((current) => current.filter((item) => item.id !== id));
 
   return (
     <main className="secondary-page">
       <div className="page-heading">
         <div>
-          <p>按下单顺序</p>
+          <p>{settings.sortMode === 'category' ? '按品类排列' : '按下单顺序'}</p>
           <h1>出餐队列</h1>
         </div>
-        <span>{queue.length} 单待处理</span>
+        <span>{syncStatus === 'connected' ? `${queue.length} 单待处理` : '正在恢复同步'}</span>
       </div>
       {orderedQueue.length ? (
         <div className="queue-grid">
@@ -427,18 +531,21 @@ function KitchenView({ queue, onQueueChange }) {
             <article className={`queue-card status-${item.status}`} key={item.id}>
               <div className="queue-card__topline">
                 <div className="queue-card__number">{String(item.number).padStart(2, '0')}<small>号</small></div>
-                <span>{item.minutes} 分钟</span>
+                <span>{Math.max(0, Math.floor((now - Date.parse(item.createdAt)) / 60_000))} 分钟</span>
               </div>
               <h2>{item.category}</h2>
               <p>{item.extras.length ? item.extras.join('、') : '不加小料'}</p>
               <div className="queue-card__action">
-                {item.status === 'ready' ? (
-                  <button type="button" className="ready-button" onClick={() => remove(item.id)}>完成取餐</button>
-                ) : (
-                  <button type="button" className="queue-button" onClick={() => advance(item.id)}>
-                    {item.status === 'waiting' ? '开始制作' : '通知取餐'}
-                  </button>
-                )}
+                <button
+                  type="button"
+                  className={item.status === 'waiting' ? 'queue-button' : 'ready-button'}
+                  disabled={pendingId === item.id}
+                  onClick={() => actOnOrder(item)}
+                >
+                  {pendingId === item.id
+                    ? '正在更新'
+                    : item.status === 'waiting' ? '开始制作' : '完成取餐'}
+                </button>
               </div>
             </article>
           ))}
@@ -454,10 +561,7 @@ function KitchenView({ queue, onQueueChange }) {
   );
 }
 
-function SettingsView() {
-  const [sortMode, setSortMode] = useState('time');
-  const [sound, setSound] = useState(true);
-
+function SettingsView({ settings, status, onChange }) {
   return (
     <main className="secondary-page settings-page">
       <div className="page-heading">
@@ -473,8 +577,8 @@ function SettingsView() {
           <p>决定出餐页面默认如何排列订单。</p>
         </div>
         <div className="segmented-control" role="radiogroup" aria-label="出餐排序">
-          <button type="button" role="radio" aria-checked={sortMode === 'time'} className={sortMode === 'time' ? 'is-active' : ''} onClick={() => setSortMode('time')}>下单顺序</button>
-          <button type="button" role="radio" aria-checked={sortMode === 'category'} className={sortMode === 'category' ? 'is-active' : ''} onClick={() => setSortMode('category')}>按品类</button>
+          <button type="button" role="radio" disabled={status === 'saving'} aria-checked={settings.sortMode === 'time'} className={settings.sortMode === 'time' ? 'is-active' : ''} onClick={() => onChange({ sortMode: 'time' })}>下单顺序</button>
+          <button type="button" role="radio" disabled={status === 'saving'} aria-checked={settings.sortMode === 'category'} className={settings.sortMode === 'category' ? 'is-active' : ''} onClick={() => onChange({ sortMode: 'category' })}>按品类</button>
         </div>
       </section>
       <section className="settings-group" aria-labelledby="sound-setting">
@@ -482,11 +586,14 @@ function SettingsView() {
           <h2 id="sound-setting">新订单提示音</h2>
           <p>有新订单时播放一次简短提示音。</p>
         </div>
-        <button type="button" className={`switch ${sound ? 'is-on' : ''}`} role="switch" aria-checked={sound} onClick={() => setSound((current) => !current)}>
+        <button type="button" disabled={status === 'saving'} className={`switch ${settings.sound ? 'is-on' : ''}`} role="switch" aria-checked={settings.sound} onClick={() => onChange({ sound: !settings.sound })}>
           <span />
-          {sound ? '已开启' : '已关闭'}
+          {settings.sound ? '已开启' : '已关闭'}
         </button>
       </section>
+      <p className={`settings-status ${status === 'error' ? 'is-error' : ''}`} aria-live="polite">
+        {status === 'saving' ? '正在保存设置' : status === 'saved' ? '设置已同步到所有设备' : status === 'error' ? '保存失败，请检查服务连接' : ''}
+      </p>
     </main>
   );
 }

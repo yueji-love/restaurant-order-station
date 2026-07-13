@@ -117,6 +117,12 @@ button:active:not(:disabled) {
   font-weight: 650;
 }
 
+.topbar__shift.is-error {
+  border-color: color-mix(in srgb, var(--danger) 38%, var(--line));
+  color: var(--danger);
+  background: #fff7f7;
+}
+
 .order-page {
   min-height: calc(100dvh - 72px);
 }
@@ -561,6 +567,11 @@ button:active:not(:disabled) {
   white-space: nowrap;
 }
 
+.action-bar__summary.is-error,
+.settings-status.is-error {
+  color: var(--danger);
+}
+
 .secondary-page {
   max-width: 1240px;
   min-height: calc(100dvh - 72px);
@@ -597,11 +608,6 @@ button:active:not(:disabled) {
 
 .queue-card.status-making {
   border-color: var(--iris);
-}
-
-.queue-card.status-ready {
-  border-color: var(--success);
-  background: var(--success-soft);
 }
 
 .queue-card__topline {
@@ -647,6 +653,13 @@ button:active:not(:disabled) {
   border-radius: var(--radius-control);
   font-weight: 700;
   cursor: pointer;
+}
+
+.queue-button:disabled,
+.ready-button:disabled {
+  border-color: #b9b9bd;
+  background: #b9b9bd;
+  cursor: wait;
 }
 
 .queue-button {
@@ -727,6 +740,12 @@ button:active:not(:disabled) {
   background: var(--canvas);
 }
 
+.segmented-control button:disabled,
+.switch:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
 .switch {
   display: inline-flex;
   min-height: 46px;
@@ -756,6 +775,14 @@ button:active:not(:disabled) {
 
 .switch.is-on span {
   background: var(--iris);
+}
+
+.settings-status {
+  min-height: 24px;
+  margin: 18px 0 0;
+  color: var(--success);
+  font-size: 14px;
+  font-weight: 650;
 }
 
 @media (max-width: 900px) {
