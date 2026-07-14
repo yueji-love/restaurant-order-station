@@ -24,7 +24,7 @@ SQLite 新增 `order_history` 表：
 id, completed_at, data_json
 ```
 
-订单仍保存创建时的菜品名称、品类、基础价格、小料名称与价格快照。完成取餐时增加 `completedAt` 并从 `orders` 移入 `order_history`。
+订单仍保存创建时的菜品名称、品类、基础价格、小料名称与价格快照，并增加 `quantity`（1–99）及按份数计算的 `totalCents`。旧订单缺少份数时按 1 份处理。完成取餐时增加 `completedAt` 并从 `orders` 移入 `order_history`。
 
 ## API
 
@@ -36,8 +36,8 @@ id, completed_at, data_json
 
 - 主视图使用 `order / kitchen / mine`。
 - “我的”内部使用 `dashboard / dishes / addOns / settings`。
-- 点单选择状态拆分为 `number / selectedGroup / dish / extras`。
-- 小料总价实时与菜品基础价格相加，确认按钮显示订单总额。
+- 点单选择状态拆分为 `number / selectedGroup / dish / extras / quantity`。
+- 小料总价实时与菜品基础价格相加后乘以份数，确认按钮显示订单总额。
 
 ## 视觉规范
 

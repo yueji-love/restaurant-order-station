@@ -656,7 +656,7 @@ button:active:not(:disabled) {
   margin: 0;
 }
 
-.summary-list div {
+.summary-list > div {
   display: grid;
   gap: 7px;
 }
@@ -671,6 +671,48 @@ button:active:not(:disabled) {
   font-size: 17px;
   font-weight: 650;
   line-height: 1.5;
+}
+
+.quantity-stepper {
+  display: inline-grid;
+  width: 122px;
+  grid-template-columns: 38px 46px 38px;
+  min-height: 38px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--canvas);
+}
+
+.quantity-stepper button {
+  display: grid;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  color: var(--ink);
+  background: transparent;
+  cursor: pointer;
+}
+
+.quantity-stepper button:last-child {
+  border-left: 1px solid var(--line);
+}
+
+.quantity-stepper button:first-child {
+  border-right: 1px solid var(--line);
+}
+
+.quantity-stepper button:disabled {
+  color: var(--ash);
+  background: var(--mist);
+  cursor: not-allowed;
+}
+
+.quantity-stepper output {
+  display: grid;
+  place-items: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 760;
 }
 
 .summary-placeholder {
@@ -885,6 +927,26 @@ button:active:not(:disabled) {
   align-items: flex-start;
   justify-content: space-between;
   color: var(--slate);
+}
+
+.queue-card__facts {
+  display: grid;
+  justify-items: end;
+  gap: 5px;
+  text-align: right;
+}
+
+.queue-card__facts strong {
+  color: var(--ink);
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: -0.03em;
+}
+
+.queue-card__facts span {
+  color: var(--slate);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
 }
 
 .queue-card__number {
@@ -2191,11 +2253,11 @@ button:active:not(:disabled) {
     min-width: 0;
   }
 
-  .summary-list div + div {
+  .summary-list > div + div {
     margin-top: 7px;
   }
 
-  .summary-list div {
+  .summary-list > div {
     grid-template-columns: 38px minmax(0, 1fr);
     align-items: baseline;
   }

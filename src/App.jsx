@@ -10,6 +10,7 @@ import {
   CookingPot,
   ForkKnife,
   LockSimple,
+  Minus,
   PencilSimple,
   Plus,
   SignOut,
@@ -50,6 +51,17 @@ let notificationAudioContext;
 
 function formatPrice(priceCents = 0) {
   return `¥${(priceCents / 100).toFixed(priceCents % 100 ? 2 : 0)}`;
+}
+
+function getOrderQuantity(order) {
+  return Number.isInteger(order?.quantity) && order.quantity >= 1 ? order.quantity : 1;
+}
+
+function getOrderTotalCents(order) {
+  if (Number.isInteger(order?.totalCents) && order.totalCents >= 0) return order.totalCents;
+  const unitTotal = (order?.priceCents ?? 0)
+    + (order?.addOns ?? []).reduce((sum, item) => sum + (item.priceCents ?? 0), 0);
+  return unitTotal * getOrderQuantity(order);
 }
 
 function getNotificationAudioContext() {
@@ -96,6 +108,7 @@ function App() {
   const [selectedGroup, setSelectedGroup] = useState('');
   const [category, setCategory] = useState(null);
   const [extras, setExtras] = useState([]);
+  const [quantity, setQuantity] = useState(1);
   const [queue, setQueue] = useState([]);
   const [dishes, setDishes] = useState([]);
   const [addOns, setAddOns] = useState([]);
@@ -180,6 +193,7 @@ function App() {
       setStep(1);
       setCategory(null);
       setExtras([]);
+      setQuantity(1);
     }
   }, [category, dishes]);
 
@@ -194,6 +208,7 @@ function App() {
       setSelectedGroup('');
       setCategory(null);
       setExtras([]);
+      setQuantity(1);
     }
   }, [dishes, selectedGroup]);
 
@@ -203,6 +218,7 @@ function App() {
     setSelectedGroup('');
     setCategory(null);
     setExtras([]);
+    setQuantity(1);
     setSubmitting(false);
     setSuccess(false);
     setSubmitError('');
@@ -217,10 +233,12 @@ function App() {
     setSelectedGroup(group);
     setCategory(null);
     setExtras([]);
+    setQuantity(1);
   };
 
   const selectCategory = (nextCategory) => {
     setCategory(nextCategory);
+    setQuantity(1);
     setStep(2);
   };
 
@@ -232,6 +250,7 @@ function App() {
     if (step === 2) {
       setCategory(null);
       setExtras([]);
+      setQuantity(1);
       setStep(1);
       return;
     }
@@ -247,7 +266,7 @@ function App() {
     setSubmitting(true);
     setSubmitError('');
     try {
-      await createOrder({ number, dishId: category.id, addOnIds: extras.map((item) => item.id) });
+      await createOrder({ number, dishId: category.id, addOnIds: extras.map((item) => item.id), quantity });
       setSubmitting(false);
       setSuccess(true);
       window.setTimeout(resetOrder, 1200);
@@ -258,6 +277,7 @@ function App() {
       if (error.message.includes('菜品') || error.message.includes('加料')) {
         setCategory(null);
         setExtras([]);
+        setQuantity(1);
         setStep(1);
       }
     }
@@ -317,6 +337,7 @@ function App() {
           category={category}
           selectedGroup={selectedGroup}
           extras={extras}
+          quantity={quantity}
           dishes={dishes.filter((item) => item.active)}
           addOns={addOns.filter((item) => item.active)}
           submitting={submitting}
@@ -329,6 +350,7 @@ function App() {
           onGroupChange={selectGroup}
           onCategoryChange={selectCategory}
           onExtrasChange={selectExtras}
+          onQuantityChange={setQuantity}
           onSubmit={submitOrder}
           onReset={resetOrder}
         />
@@ -465,6 +487,7 @@ function OrderView({
   category,
   selectedGroup,
   extras,
+  quantity,
   dishes,
   addOns,
   submitting,
@@ -477,6 +500,7 @@ function OrderView({
   onGroupChange,
   onCategoryChange,
   onExtrasChange,
+  onQuantityChange,
   onSubmit,
   onReset,
 }) {
@@ -514,7 +538,13 @@ function OrderView({
           {step === 2 && <ExtraGrid items={availableAddOns} value={extras} onChange={onExtrasChange} />}
         </section>
 
-        <OrderSummary number={number} category={category} extras={extras} />
+        <OrderSummary
+          number={number}
+          category={category}
+          extras={extras}
+          quantity={quantity}
+          onQuantityChange={onQuantityChange}
+        />
       </div>
 
       <ActionBar
@@ -522,6 +552,7 @@ function OrderView({
         number={number}
         category={category}
         extras={extras}
+        quantity={quantity}
         submitting={submitting}
         success={success}
         submitError={submitError}
@@ -634,9 +665,10 @@ function ConfirmPanel({ number, category, extras }) {
   );
 }
 
-function OrderSummary({ number, category, extras }) {
+function OrderSummary({ number, category, extras, quantity, onQuantityChange }) {
   const hasSelection = number || category || extras.length;
-  const total = (category?.priceCents ?? 0) + extras.reduce((sum, item) => sum + item.priceCents, 0);
+  const unitTotal = (category?.priceCents ?? 0) + extras.reduce((sum, item) => sum + item.priceCents, 0);
+  const total = unitTotal * quantity;
   return (
     <aside className="order-summary" aria-label="当前订单">
       <h2>当前订单</h2>
@@ -646,6 +678,22 @@ function OrderSummary({ number, category, extras }) {
         <dl className="summary-list">
           <div><dt>菜品</dt><dd>{category?.name ?? '尚未选择'}</dd></div>
           <div><dt>小料</dt><dd>{extras.length ? extras.map((item) => item.name).join('、') : '未添加'}</dd></div>
+          {category && (
+            <div className="summary-list__quantity">
+              <dt>份数</dt>
+              <dd>
+                <div className="quantity-stepper" role="group" aria-label="调整菜品份数">
+                  <button type="button" disabled={quantity <= 1} onClick={() => onQuantityChange(Math.max(1, quantity - 1))} aria-label="减少一份">
+                    <Minus size={17} weight="bold" aria-hidden="true" />
+                  </button>
+                  <output aria-live="polite" aria-label={`当前 ${quantity} 份`}>{quantity}</output>
+                  <button type="button" disabled={quantity >= 99} onClick={() => onQuantityChange(Math.min(99, quantity + 1))} aria-label="增加一份">
+                    <Plus size={17} weight="bold" aria-hidden="true" />
+                  </button>
+                </div>
+              </dd>
+            </div>
+          )}
           {category && <div><dt>合计</dt><dd>{formatPrice(total)}</dd></div>}
         </dl>
       ) : (
@@ -655,8 +703,9 @@ function OrderSummary({ number, category, extras }) {
   );
 }
 
-function ActionBar({ step, number, category, extras, submitting, success, submitError, onSubmit, onReset }) {
-  const summary = [number ? `${number}号` : null, category?.name, extras.length ? extras.map((item) => item.name).join('、') : null].filter(Boolean).join(' / ');
+function ActionBar({ step, number, category, extras, quantity, submitting, success, submitError, onSubmit, onReset }) {
+  const unitTotal = (category?.priceCents ?? 0) + extras.reduce((sum, item) => sum + item.priceCents, 0);
+  const summary = [number ? `${number}号` : null, category?.name, category ? `${quantity}份` : null, extras.length ? extras.map((item) => item.name).join('、') : null].filter(Boolean).join(' / ');
   return (
     <footer className={`action-bar ${step < 2 ? 'is-auto-flow' : ''}`}>
       <button type="button" className="clear-button" onClick={onReset} disabled={!number && !category && !extras.length}>
@@ -665,7 +714,7 @@ function ActionBar({ step, number, category, extras, submitting, success, submit
       <div className={`action-bar__summary ${submitError ? 'is-error' : ''}`} aria-live="polite">{submitError || summary}</div>
       {step === 2 && (
         <button type="button" className={`primary-button ${success ? 'is-success' : ''}`} disabled={submitting || success} onClick={onSubmit}>
-          {success ? <><Check size={22} weight="bold" />下单成功</> : submitting ? '正在下单' : <>确认下单 {formatPrice((category?.priceCents ?? 0) + extras.reduce((sum, item) => sum + item.priceCents, 0))}<ArrowRight size={22} weight="bold" /></>}
+          {success ? <><Check size={22} weight="bold" />下单成功</> : submitting ? '正在下单' : <>确认下单 {formatPrice(unitTotal * quantity)}<ArrowRight size={22} weight="bold" /></>}
         </button>
       )}
     </footer>
@@ -742,7 +791,10 @@ function KitchenView({ queue, onOrderAction, onCategoryAction }) {
             <article className={`queue-card status-${item.status}`} key={item.id}>
               <div className="queue-card__topline">
                 <div className="queue-card__number">{String(item.number).padStart(2, '0')}<small>号</small></div>
-                <span>{Math.max(0, Math.floor((now - Date.parse(item.createdAt)) / 60_000))} 分钟</span>
+                <div className="queue-card__facts">
+                  <strong>{formatPrice(getOrderTotalCents(item))}</strong>
+                  <span>{getOrderQuantity(item)}份 · {Math.max(0, Math.floor((now - Date.parse(item.createdAt)) / 60_000))} 分钟</span>
+                </div>
               </div>
               <h2>{item.category}</h2>
               <p>{item.extras?.length ? item.extras.join('、') : '不加小料'}</p>

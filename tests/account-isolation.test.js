@@ -149,12 +149,21 @@ test('不同账号的菜单、设置、订单和统计互相隔离', async () =>
       body: { availableNumbers: [7] },
     })).status, 200);
 
+    const invalidQuantity = await request(app.baseUrl, '/api/orders', {
+      cookie: cookieA,
+      method: 'POST',
+      body: { number: 7, dishId: dishResult.payload.id, addOnIds: [], quantity: 100 },
+    });
+    assert.equal(invalidQuantity.status, 400);
+
     const orderResult = await request(app.baseUrl, '/api/orders', {
       cookie: cookieA,
       method: 'POST',
-      body: { number: 7, dishId: dishResult.payload.id, addOnIds: [addOnResult.payload.id] },
+      body: { number: 7, dishId: dishResult.payload.id, addOnIds: [addOnResult.payload.id], quantity: 3 },
     });
     assert.equal(orderResult.status, 201);
+    assert.equal(orderResult.payload.quantity, 3);
+    assert.equal(orderResult.payload.totalCents, 3600);
     assert.equal((await request(app.baseUrl, `/api/orders/${orderResult.payload.id}`, {
       cookie: cookieA,
       method: 'PATCH',
@@ -220,6 +229,9 @@ test('不同账号的菜单、设置、订单和统计互相隔离', async () =>
       { cookie: cookieB },
     );
     assert.equal(analyticsA.payload.summary.orderCount, 1);
+    assert.equal(analyticsA.payload.summary.revenueCents, 3600);
+    assert.equal(analyticsA.payload.summary.addOnCount, 3);
+    assert.equal(analyticsA.payload.dishes[0].count, 3);
     assert.equal(analyticsB.payload.summary.orderCount, 0);
   } finally {
     await stopApplication(app.child);

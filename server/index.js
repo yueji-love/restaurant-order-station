@@ -344,9 +344,12 @@ app.get('/api/analytics', (request, response) => {
 
 app.post('/api/orders', (request, response) => {
   const workspace = request.workspace;
-  const { number, dishId, addOnIds = [] } = request.body ?? {};
+  const { number, dishId, addOnIds = [], quantity = 1 } = request.body ?? {};
   if (!Number.isInteger(number) || number < 1 || number > 999 || typeof dishId !== 'string') {
     return response.status(400).json({ message: '订单号码或菜品无效。' });
+  }
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
+    return response.status(400).json({ message: '菜品份数需为 1 到 99 之间的整数。' });
   }
   if (!workspace.settings.availableNumbers.includes(number)) {
     return response.status(409).json({ message: `${number}号牌未启用，请在设置中添加后再下单。` });
@@ -368,6 +371,9 @@ app.post('/api/orders', (request, response) => {
     return response.status(409).json({ message: '所选小料不适用于该菜品，请重新选择。' });
   }
 
+  const unitTotalCents = dish.priceCents
+    + selectedAddOns.reduce((sum, item) => sum + item.priceCents, 0);
+
   const order = {
     id: createId('order'),
     number,
@@ -375,9 +381,10 @@ app.post('/api/orders', (request, response) => {
     category: dish.name,
     dishGroup: dish.group,
     priceCents: dish.priceCents,
+    quantity,
     addOns: selectedAddOns.map((item) => ({ id: item.id, name: item.name, priceCents: item.priceCents })),
     extras: selectedAddOns.map((item) => item.name),
-    totalCents: dish.priceCents + selectedAddOns.reduce((sum, item) => sum + item.priceCents, 0),
+    totalCents: unitTotalCents * quantity,
     status: 'waiting',
     createdAt: nowIso(),
   };
