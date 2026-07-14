@@ -5,6 +5,8 @@
 - Gitee：`https://gitee.com/yuejilove/restaurant-order-station.git`
 - GitHub：`https://github.com/yueji-love/restaurant-order-station.git`
 
+腾讯云 Ubuntu + Docker 的完整部署、数据库备份、日常更新和故障回滚步骤，见 [`DEPLOY_TENCENT_CLOUD.md`](./DEPLOY_TENCENT_CLOUD.md)。服务器更新时必须先备份 `/opt/restaurant-order-station/data/restaurant.sqlite`，再拉取代码并重建容器。
+
 ## 本地运行
 
 ```bash

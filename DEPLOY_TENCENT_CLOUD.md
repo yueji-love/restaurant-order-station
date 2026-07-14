@@ -286,53 +286,169 @@ HTTPS 生效后，Chrome 或 Edge 才能在非本机设备上正常安装 PWA。
 - [ ] Chrome/Edge 可以安装到桌面，打开后没有普通地址栏
 - [ ] 腾讯云安全组没有开放 `5175`
 
-## 十一、以后更新程序
+## 十一、日常备份数据库并更新 Docker
 
-每次代码推送到 Gitee 后，建议先按下一节备份数据库，再在服务器执行：
+这是以后每次发布新版本时使用的标准流程。顺序必须是：**确认环境、备份数据库、保留旧镜像、拉取代码、重建容器、检查结果**。
+
+项目的真实数据文件是：
+
+```text
+/opt/restaurant-order-station/data/restaurant.sqlite
+```
+
+`compose.yaml` 已把服务器的 `./data` 目录挂载到容器的 `/app/server/data`，所以正常执行 `docker compose build`、`up`、`down` 都不会删除数据库。不要手动删除 `data` 目录，也不要把数据库提交到 Git。
+
+### 第 1 步：进入项目并确认没有服务器本地改动
 
 ```bash
 cd /opt/restaurant-order-station
-git pull origin master
-docker compose build --pull
-docker compose up -d
+git status --short
 docker compose ps
 ```
 
-从旧版首次更新到账号隔离版本时，程序会自动迁移数据库：原有菜单、设置、订单和历史数据归属 `yue`；其他账号会得到各自独立的空工作台。不要在迁移过程中降级或同时运行两个版本。
+`git status --short` 正常应该没有任何输出。如果出现文件名，先不要拉取代码，保留完整输出再排查，避免覆盖服务器上的临时修改。
 
-确认新版本正常后，可清理旧镜像：
+### 第 2 步：停止应用并备份 SQLite 数据库
+
+备份放在项目目录外的 `/opt/restaurant-order-station-backups`，不会因为重新拉取项目而丢失：
+
+```bash
+cd /opt/restaurant-order-station
+sudo mkdir -p /opt/restaurant-order-station-backups
+BACKUP_FILE="/opt/restaurant-order-station-backups/restaurant-$(date +%F-%H%M%S).sqlite"
+
+docker compose stop app
+sudo cp --preserve=timestamps data/restaurant.sqlite "$BACKUP_FILE"
+docker compose start app
+
+sudo test -s "$BACKUP_FILE" && echo "数据库备份成功：$BACKUP_FILE"
+sudo ls -lh "$BACKUP_FILE"
+sudo sha256sum "$BACKUP_FILE"
+docker compose ps
+```
+
+停止应用后再复制，可以保证 SQLite 主文件、WAL 日志和内存中的写入已经正确收尾。停机时间通常只有几秒钟。
+
+如果 `test -s` 没有显示“数据库备份成功”，不要继续更新。先执行下面命令确认原数据库是否存在：
+
+```bash
+sudo ls -lh /opt/restaurant-order-station/data/
+```
+
+### 第 3 步：记录旧版本并保留回滚镜像
+
+```bash
+cd /opt/restaurant-order-station
+BEFORE_VERSION="$(git rev-parse HEAD)"
+echo "$BEFORE_VERSION" | sudo tee "/opt/restaurant-order-station-backups/version-before-$(date +%F-%H%M%S).txt"
+
+if docker image inspect restaurant-order-station:latest >/dev/null 2>&1; then
+  docker image tag restaurant-order-station:latest restaurant-order-station:rollback
+fi
+```
+
+`restaurant-order-station:rollback` 是更新前的应用镜像。新版本发生严重问题时，可以立即切回。
+
+### 第 4 步：从 Gitee 拉取并重建 Docker
+
+腾讯云服务器优先从 Gitee 拉取，避免 GitHub 网络不稳定：
+
+```bash
+cd /opt/restaurant-order-station
+git pull --ff-only origin master
+docker compose build --pull app
+docker compose up -d --remove-orphans
+```
+
+项目构建阶段默认使用国内 npm 镜像 `https://registry.npmmirror.com`。`--ff-only` 可以在服务器代码发生意外分叉时停止更新，而不是自动生成难以处理的合并提交。
+
+### 第 5 步：检查新版本
+
+```bash
+cd /opt/restaurant-order-station
+docker compose ps
+docker compose logs --tail=100 app
+curl -fsS http://127.0.0.1:5175/api/auth/me
+```
+
+正常结果：
+
+- `docker compose ps` 中的应用最终显示 `healthy`
+- 日志没有反复重启或数据库报错
+- `curl` 返回 `{"user":null}`，表示接口可访问
+- 浏览器中原账号、菜单、订单和历史数据仍然存在
+
+PWA 可能短时间显示旧界面。关闭桌面应用后重新打开，或在浏览器中强制刷新一次，让 Service Worker 获取新资源。
+
+### 第 6 步：确认正常后清理无用镜像（可选）
+
+至少正常使用一段时间后再执行：
 
 ```bash
 docker image prune -f
 ```
 
-## 十二、备份与恢复
+带有 `restaurant-order-station:rollback` 标签的回滚镜像不会被这条命令删除。
 
-### 备份数据库
+## 十二、下载备份、恢复与回滚
 
-为了保证 SQLite 备份完整，先短暂停止应用再复制：
+### 把数据库备份下载到自己的 Windows 电脑
+
+先在服务器查看备份文件名：
 
 ```bash
-cd /opt/restaurant-order-station
-mkdir -p backups
-docker compose stop app
-cp data/restaurant.sqlite "backups/restaurant-$(date +%F-%H%M%S).sqlite"
-docker compose start app
-ls -lh backups
+sudo ls -lht /opt/restaurant-order-station-backups/
 ```
 
-建议再把备份下载到自己的电脑，不要只保存在同一台服务器。
+然后在自己电脑的 PowerShell 中执行，把文件名和服务器 IP 换成真实值：
 
-### 恢复数据库
+```powershell
+scp root@服务器公网IP:/opt/restaurant-order-station-backups/restaurant-2026-07-14-120000.sqlite "D:\餐厅数据库备份\"
+```
+
+不要只把备份放在同一台云服务器上。服务器磁盘故障或误删时，本地副本才能真正起到备份作用。
+
+### 只恢复数据库
+
+先从备份列表中选择要恢复的文件，再执行：
 
 ```bash
 cd /opt/restaurant-order-station
-docker compose down
-cp backups/要恢复的文件.sqlite data/restaurant.sqlite
+RESTORE_FILE="/opt/restaurant-order-station-backups/要恢复的文件.sqlite"
+
+docker compose stop app
+sudo cp "$RESTORE_FILE" data/restaurant.sqlite
 sudo chown 1000:1000 data/restaurant.sqlite
 sudo chmod 600 data/restaurant.sqlite
-docker compose up -d
+docker compose start app
+
+docker compose ps
+docker compose logs --tail=100 app
 ```
+
+### 新版本异常时同时回滚应用和数据库
+
+只有新版本确实无法正常使用时才执行。把 `RESTORE_FILE` 改成更新前刚创建的备份：
+
+```bash
+cd /opt/restaurant-order-station
+RESTORE_FILE="/opt/restaurant-order-station-backups/更新前的数据库备份.sqlite"
+
+docker compose stop app
+sudo cp "$RESTORE_FILE" data/restaurant.sqlite
+sudo chown 1000:1000 data/restaurant.sqlite
+sudo chmod 600 data/restaurant.sqlite
+
+docker image tag restaurant-order-station:rollback restaurant-order-station:latest
+docker compose up -d --no-build --force-recreate app
+
+docker compose ps
+docker compose logs --tail=100 app
+```
+
+回滚成功后先不要再次构建镜像。保留错误日志和执行过的命令，再修复新版本问题。
+
+从旧版首次更新到账号隔离版本时，程序会自动迁移数据库：原有菜单、设置、订单和历史数据归属 `yue`；其他账号会得到各自独立的空工作台。不要在迁移过程中降级或同时运行两个版本。
 
 ## 十三、常见问题
 
