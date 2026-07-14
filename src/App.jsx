@@ -746,6 +746,10 @@ function KitchenView({ queue, onOrderAction, onCategoryAction }) {
   const activeCategory = categoryGroups.some((item) => item.name === selectedCategory) ? selectedCategory : '';
   const activeGroup = categoryGroups.find((item) => item.name === activeCategory);
   const orderedQueue = useMemo(() => [...queue].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt)), [queue]);
+  const queuePositionById = useMemo(
+    () => new Map(orderedQueue.map((item, index) => [item.id, index + 1])),
+    [orderedQueue],
+  );
   const visibleQueue = activeCategory ? orderedQueue.filter((item) => item.category === activeCategory) : orderedQueue;
 
   const actOnOrder = async (item) => {
@@ -793,7 +797,9 @@ function KitchenView({ queue, onOrderAction, onCategoryAction }) {
                 <div className="queue-card__number">{String(item.number).padStart(2, '0')}<small>号</small></div>
                 <div className="queue-card__facts">
                   <strong>{formatPrice(getOrderTotalCents(item))}</strong>
-                  <span>{getOrderQuantity(item)}份 · {Math.max(0, Math.floor((now - Date.parse(item.createdAt)) / 60_000))} 分钟</span>
+                  <span>{getOrderQuantity(item)}份</span>
+                  <span>{Math.max(0, Math.floor((now - Date.parse(item.createdAt)) / 60_000))} 分钟</span>
+                  <span className="queue-card__position">队列第 {queuePositionById.get(item.id)} 位</span>
                 </div>
               </div>
               <h2>{item.category}</h2>

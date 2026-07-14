@@ -932,7 +932,7 @@ button:active:not(:disabled) {
 .queue-card__facts {
   display: grid;
   justify-items: end;
-  gap: 5px;
+  gap: 3px;
   text-align: right;
 }
 
@@ -947,6 +947,11 @@ button:active:not(:disabled) {
   color: var(--slate);
   font-size: 14px;
   font-variant-numeric: tabular-nums;
+}
+
+.queue-card__facts .queue-card__position {
+  color: var(--iris);
+  font-weight: 700;
 }
 
 .queue-card__number {
