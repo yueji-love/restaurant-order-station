@@ -167,6 +167,11 @@ test('不同账号的菜单、设置、订单和统计互相隔离', async () =>
     assert.equal((await request(app.baseUrl, `/api/orders/${orderResult.payload.id}`, {
       cookie: cookieA,
       method: 'PATCH',
+      body: { action: 'start' },
+    })).status, 200);
+    assert.equal((await request(app.baseUrl, `/api/orders/${orderResult.payload.id}`, {
+      cookie: cookieA,
+      method: 'PATCH',
       body: { action: 'complete' },
     })).status, 200);
 
@@ -233,6 +238,51 @@ test('不同账号的菜单、设置、订单和统计互相隔离', async () =>
     assert.equal(analyticsA.payload.summary.addOnCount, 3);
     assert.equal(analyticsA.payload.dishes[0].count, 3);
     assert.equal(analyticsB.payload.summary.orderCount, 0);
+
+    const exportQuery = `from=${encodeURIComponent(new Date(now - 60_000).toISOString())}&to=${encodeURIComponent(new Date(now + 60_000).toISOString())}`;
+    const jsonExportAResponse = await fetch(`${app.baseUrl}/api/order-exports?${exportQuery}&format=json`, {
+      headers: { Cookie: cookieA },
+    });
+    assert.equal(jsonExportAResponse.status, 200);
+    assert.match(jsonExportAResponse.headers.get('content-type'), /application\/json/);
+    assert.match(jsonExportAResponse.headers.get('content-disposition'), /orders-\d{8}-\d{8}\.json/);
+    const jsonExportA = await jsonExportAResponse.json();
+    assert.equal(jsonExportA.merchant.username, 'merchant-a');
+    assert.equal(jsonExportA.range.basis, 'completedAt');
+    assert.equal(jsonExportA.range.timezone, 'Asia/Shanghai');
+    assert.equal(jsonExportA.orderCount, 1);
+    assert.equal(jsonExportA.orders[0].id, orderResult.payload.id);
+    assert.equal(jsonExportA.orders[0].quantity, 3);
+    assert.equal(jsonExportA.orders[0].totalCents, 3600);
+    assert.equal(jsonExportA.orders[0].addOns[0].name, '账号A小料');
+    assert.match(jsonExportA.orders[0].createdAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.match(jsonExportA.orders[0].startedAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.match(jsonExportA.orders[0].completedAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.match(jsonExportA.orders[0].exportAnalysis.completedAtChina, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    assert.equal(typeof jsonExportA.orders[0].exportAnalysis.totalServiceSeconds, 'number');
+
+    const jsonExportBResponse = await fetch(`${app.baseUrl}/api/order-exports?${exportQuery}&format=json`, {
+      headers: { Cookie: cookieB },
+    });
+    assert.equal(jsonExportBResponse.status, 200);
+    const jsonExportB = await jsonExportBResponse.json();
+    assert.equal(jsonExportB.orderCount, 0);
+    assert.deepEqual(jsonExportB.orders, []);
+
+    const csvExportResponse = await fetch(`${app.baseUrl}/api/order-exports?${exportQuery}&format=csv`, {
+      headers: { Cookie: cookieA },
+    });
+    assert.equal(csvExportResponse.status, 200);
+    assert.match(csvExportResponse.headers.get('content-type'), /text\/csv/);
+    const csvBytes = new Uint8Array(await csvExportResponse.arrayBuffer());
+    assert.deepEqual([...csvBytes.slice(0, 3)], [0xef, 0xbb, 0xbf]);
+    const csvExport = new TextDecoder().decode(csvBytes);
+    assert.match(csvExport, /"订单ID"/);
+    assert.match(csvExport, /"账号A菜品"/);
+    assert.match(csvExport, /"原始订单JSON"/);
+
+    const unauthenticatedExport = await fetch(`${app.baseUrl}/api/order-exports?${exportQuery}&format=json`);
+    assert.equal(unauthenticatedExport.status, 401);
   } finally {
     await stopApplication(app.child);
     rmSync(directory, { recursive: true, force: true });

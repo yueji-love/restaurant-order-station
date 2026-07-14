@@ -15,10 +15,7 @@ function orderQuantity(order) {
 }
 
 export function buildAnalytics(history, from, to) {
-  const orders = history.filter((order) => {
-    const completedAt = Date.parse(order.completedAt);
-    return Number.isFinite(completedAt) && completedAt >= from && completedAt < to;
-  });
+  const orders = completedOrdersInRange(history, from, to);
   const revenueCents = orders.reduce((sum, order) => sum + (order.totalCents ?? 0), 0);
   const addOnRows = orders.flatMap((order) => (
     (order.addOns ?? []).map((addOn) => ({ ...addOn, quantity: orderQuantity(order) }))
@@ -35,4 +32,11 @@ export function buildAnalytics(history, from, to) {
     dishes: aggregateBy(orders, (order) => order.category, orderQuantity),
     addOns: aggregateBy(addOnRows, (addOn) => addOn.name, (addOn) => addOn.quantity),
   };
+}
+
+export function completedOrdersInRange(history, from, to) {
+  return history.filter((order) => {
+    const completedAt = Date.parse(order.completedAt);
+    return Number.isFinite(completedAt) && completedAt >= from && completedAt < to;
+  });
 }

@@ -31,11 +31,21 @@ id, completed_at, data_json
 - 现有菜品 POST/PATCH 接口增加 `allowedAddOnIds` 校验。
 - `GET /api/analytics?from=<ISO>&to=<ISO>` 返回所选区间的汇总和排行。
 - 分析结果结构：`summary / categories / dishes / addOns / range`。
+- `GET /api/order-exports?from=<ISO>&to=<ISO>&format=<csv|json>` 下载当前账号在所选区间内的完整历史订单。
+- 导出接口与分析接口共用 `completedAt >= from && completedAt < to` 过滤规则，并返回禁止缓存的附件响应。
+
+## 导出结构
+
+- CSV：每条订单一行，包含菜品与小料价格快照、原始 ISO 时间、北京时间、等待/制作/总耗时以及原始订单 JSON；文件带 UTF-8 BOM。
+- JSON：包含 `schemaVersion / exportedAt / merchant / range / orderCount / orders`，订单保留原始字段并增加 `exportAnalysis` 派生信息。
+- 时间：原始订单时间为 UTC ISO 8601（毫秒精度），展示分析时间使用 `Asia/Shanghai` 并精确到秒。
+- 兼容：缺少 `quantity` 的旧订单按 1 份处理，缺少 `startedAt` 时等待和制作耗时为 `null`。
 
 ## 前端状态
 
 - 主视图使用 `order / kitchen / mine`。
 - “我的”内部使用 `dashboard / dishes / addOns / settings`。
+- 数据看板在当前时间筛选旁提供 CSV 和 JSON 导出按钮；无完成订单时按钮禁用。
 - 点单选择状态拆分为 `number / selectedGroup / dish / extras / quantity`。
 - 小料总价实时与菜品基础价格相加后乘以份数，确认按钮显示订单总额。
 

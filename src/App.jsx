@@ -8,6 +8,7 @@ import {
   CaretUp,
   ClipboardText,
   CookingPot,
+  DownloadSimple,
   ForkKnife,
   LockSimple,
   Minus,
@@ -26,6 +27,7 @@ import {
   createOrder,
   deleteAddOn,
   deleteDish,
+  downloadOrderExport,
   getCurrentUser,
   getAnalytics,
   getState,
@@ -880,10 +882,12 @@ function DashboardView() {
   const [customTo, setCustomTo] = useState(toDateInput(today));
   const [data, setData] = useState(null);
   const [status, setStatus] = useState('loading');
+  const [exportStatus, setExportStatus] = useState('idle');
 
   useEffect(() => {
     let active = true;
     setStatus('loading');
+    setExportStatus('idle');
     const range = analyticsRange(preset, customFrom, customTo);
     if (!range) {
       setStatus('error');
@@ -900,6 +904,25 @@ function DashboardView() {
   }, [preset, customFrom, customTo]);
 
   const summary = data?.summary ?? { revenueCents: 0, orderCount: 0, averageOrderCents: 0, addOnCount: 0 };
+  const exportOrders = async (format) => {
+    if (!data?.range || exportStatus === 'csv' || exportStatus === 'json') return;
+    setExportStatus(format);
+    try {
+      const file = await downloadOrderExport({ ...data.range, format });
+      const url = URL.createObjectURL(file.blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = file.filename;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setExportStatus('done');
+    } catch {
+      setExportStatus('error');
+    }
+  };
+
   return (
     <main className="secondary-page dashboard-page">
       <div className="dashboard-filters" role="group" aria-label="统计时间">
@@ -912,7 +935,17 @@ function DashboardView() {
             <label>结束<input type="date" value={customTo} min={customFrom} onChange={(event) => setCustomTo(event.target.value)} /></label>
           </div>
         )}
+        <div className="dashboard-export-actions" aria-label="导出订单明细">
+          <button type="button" disabled={status !== 'ready' || summary.orderCount === 0 || exportStatus === 'csv' || exportStatus === 'json'} onClick={() => exportOrders('csv')}>
+            <DownloadSimple size={17} weight="bold" />{exportStatus === 'csv' ? '正在导出' : '导出 CSV'}
+          </button>
+          <button type="button" disabled={status !== 'ready' || summary.orderCount === 0 || exportStatus === 'csv' || exportStatus === 'json'} onClick={() => exportOrders('json')}>
+            <DownloadSimple size={17} weight="bold" />{exportStatus === 'json' ? '正在导出' : '导出 JSON'}
+          </button>
+        </div>
       </div>
+      {exportStatus === 'done' && <p className="dashboard-export-status" role="status">订单明细已导出。</p>}
+      {exportStatus === 'error' && <p className="dashboard-export-status is-error" role="alert">导出失败，请稍后重试。</p>}
       {status === 'error' && <div className="dashboard-state">数据读取失败，请稍后重试。</div>}
       {status === 'loading' && <div className="dashboard-state">正在汇总历史订单</div>}
       {status === 'ready' && (

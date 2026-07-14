@@ -1979,6 +1979,50 @@ button:active:not(:disabled) {
   background: var(--canvas);
 }
 
+.dashboard-export-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.dashboard-export-actions button {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 14px;
+  border: 1px solid var(--charcoal);
+  border-radius: 8px;
+  color: var(--charcoal);
+  background: var(--canvas);
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.dashboard-export-actions button:first-child {
+  color: #fff;
+  background: var(--charcoal);
+}
+
+.dashboard-export-actions button:disabled {
+  border-color: var(--line);
+  color: var(--ash);
+  background: var(--mist);
+  cursor: not-allowed;
+}
+
+.dashboard-export-status {
+  margin: -20px 0 24px;
+  color: var(--success);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.dashboard-export-status.is-error {
+  color: var(--danger);
+}
+
 .segmented-control button:disabled,
 .switch:disabled {
   cursor: wait;
@@ -2423,6 +2467,15 @@ button:active:not(:disabled) {
   .dashboard-custom-range input {
     min-width: 0;
     width: 100%;
+  }
+
+  .dashboard-export-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .dashboard-export-actions button {
+    flex: 1;
   }
 
   .dashboard-metrics {

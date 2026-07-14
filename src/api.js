@@ -44,6 +44,20 @@ export function getAnalytics({ from, to }) {
   return request(`/api/analytics?${query.toString()}`);
 }
 
+export async function downloadOrderExport({ from, to, format }) {
+  const query = new URLSearchParams({ from, to, format });
+  const response = await fetch(`/api/order-exports?${query.toString()}`, { credentials: 'same-origin' });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    const error = new Error(payload?.message || `导出失败 (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
+  const disposition = response.headers.get('content-disposition') ?? '';
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? `orders.${format}`;
+  return { filename, blob: await response.blob() };
+}
+
 export function createOrder(order) {
   return request('/api/orders', {
     method: 'POST',

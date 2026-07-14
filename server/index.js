@@ -15,6 +15,7 @@ import {
 } from './auth.js';
 import { buildAnalytics } from './analytics.js';
 import { loadStateFromDatabase, saveStateToDatabase } from './database.js';
+import { buildOrderExport } from './order-export.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
@@ -340,6 +341,32 @@ app.get('/api/analytics', (request, response) => {
     return response.status(400).json({ message: '请选择有效的统计时间范围。' });
   }
   return response.json(buildAnalytics(request.workspace.history, from, to));
+});
+
+app.get('/api/order-exports', (request, response) => {
+  const from = Date.parse(request.query.from);
+  const to = Date.parse(request.query.to);
+  const format = request.query.format;
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) {
+    return response.status(400).json({ message: '请选择有效的导出时间范围。' });
+  }
+  if (!['csv', 'json'].includes(format)) {
+    return response.status(400).json({ message: '导出格式仅支持 CSV 或 JSON。' });
+  }
+  const exported = buildOrderExport({
+    history: request.workspace.history,
+    from,
+    to,
+    format,
+    user: request.authUser,
+  });
+  response.set({
+    'Content-Type': exported.contentType,
+    'Content-Disposition': `attachment; filename="${exported.filename}"`,
+    'Cache-Control': 'private, no-store',
+    'X-Order-Count': String(exported.orderCount),
+  });
+  return response.send(exported.body);
 });
 
 app.post('/api/orders', (request, response) => {
