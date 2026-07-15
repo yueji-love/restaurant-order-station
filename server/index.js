@@ -2,6 +2,7 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import QRCode from 'qrcode';
 import {
   SESSION_COOKIE,
   SESSION_DURATION_MS,
@@ -14,155 +15,63 @@ import {
   verifyPassword,
 } from './auth.js';
 import { buildAnalytics } from './analytics.js';
-import { loadStateFromDatabase, saveStateToDatabase } from './database.js';
+import { createId, getDatabase, withTransaction } from './database.js';
 import { buildOrderExport } from './order-export.js';
+import { RestaurantStore } from './store.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
 const port = Number(process.env.PORT || 5175);
-const defaultAvailableNumbers = Array.from({ length: 36 }, (_, index) => index + 1);
+const database = await getDatabase();
+const store = new RestaurantStore(database);
+const staffClients = new Map();
+const publicClients = new Map();
+const publicRateLimits = new Map();
+const TOKEN_PATTERN = /^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{16}$/;
 
 function nowIso() {
   return new Date().toISOString();
 }
 
-function createId(prefix) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+function sendEvent(response, event, payload) {
+  response.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
 }
 
-function normalizeAvailableNumbers(value) {
-  if (!Array.isArray(value)) return [...defaultAvailableNumbers];
-  const numbers = [...new Set(value.filter((item) => Number.isInteger(item) && item >= 1 && item <= 999))]
-    .sort((a, b) => a - b);
-  return numbers.length ? numbers : [...defaultAvailableNumbers];
-}
-
-function normalizeDishes(value, defaultAddOnIds = []) {
-  const source = Array.isArray(value) ? value : [];
-  return source
-    .filter((item) => item && typeof item.name === 'string' && item.name.trim())
-    .map((item, index) => ({
-      id: typeof item.id === 'string' && item.id ? item.id : `dish-imported-${index + 1}`,
-      group: typeof item.group === 'string' && item.group.trim() ? item.group.trim().slice(0, 30) : '未分类',
-      name: item.name.trim().slice(0, 60),
-      note: typeof item.note === 'string' ? item.note.trim().slice(0, 100) : '',
-      priceCents: Number.isInteger(item.priceCents) && item.priceCents >= 0 ? item.priceCents : 0,
-      active: item.active !== false,
-      createdAt: typeof item.createdAt === 'string' ? item.createdAt : nowIso(),
-      updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : nowIso(),
-      allowedAddOnIds: Array.isArray(item.allowedAddOnIds)
-        ? [...new Set(item.allowedAddOnIds.filter((id) => typeof id === 'string'))]
-        : [...defaultAddOnIds],
-    }));
-}
-
-function normalizeAddOns(value) {
-  const source = Array.isArray(value) ? value : [];
-  return source
-    .filter((item) => item && typeof item.name === 'string' && item.name.trim())
-    .map((item, index) => ({
-      id: typeof item.id === 'string' && item.id ? item.id : `addon-imported-${index + 1}`,
-      name: item.name.trim().slice(0, 40),
-      priceCents: Number.isInteger(item.priceCents) && item.priceCents >= 0 ? item.priceCents : 0,
-      active: item.active !== false,
-      createdAt: typeof item.createdAt === 'string' ? item.createdAt : nowIso(),
-      updatedAt: typeof item.updatedAt === 'string' ? item.updatedAt : nowIso(),
-    }));
-}
-
-function createWorkspace(source = {}) {
-  const addOns = normalizeAddOns(source.addOns);
-  return {
-    queue: Array.isArray(source.queue) ? source.queue : [],
-    dishes: normalizeDishes(source.dishes, addOns.map((item) => item.id)),
-    addOns,
-    settings: {
-      sortMode: source.settings?.sortMode === 'category' ? 'category' : 'time',
-      sound: source.settings?.sound !== false,
-      availableNumbers: normalizeAvailableNumbers(source.settings?.availableNumbers),
-    },
-    history: Array.isArray(source.history) ? source.history : [],
-  };
-}
-
-const initialState = {
-  users: [],
-  sessions: [],
-  workspaces: {},
-};
-
-function readState() {
-  const stored = loadStateFromDatabase();
-  if (!stored) return structuredClone(initialState);
-  try {
-    const users = Array.isArray(stored.users) ? stored.users : [];
-    return {
-      users,
-      sessions: Array.isArray(stored.sessions)
-        ? stored.sessions.filter((item) => Date.parse(item.expiresAt) > Date.now())
-        : [],
-      workspaces: Object.fromEntries(users.map((user) => [
-        user.id,
-        createWorkspace(stored.workspaces?.[user.id]),
-      ])),
-    };
-  } catch (error) {
-    console.error('无法读取数据库，将使用初始状态。', error);
-    return structuredClone(initialState);
-  }
-}
-
-let state = readState();
-const clients = new Map();
-
-function workspaceForUser(userId) {
-  if (!state.workspaces[userId]) state.workspaces[userId] = createWorkspace();
-  return state.workspaces[userId];
-}
-
-function publicState(workspace) {
-  return {
-    queue: workspace.queue,
-    dishes: workspace.dishes,
-    addOns: workspace.addOns,
-    settings: workspace.settings,
-  };
-}
-
-function persistState() {
-  saveStateToDatabase(state);
-}
-
-function sendState(response, userId) {
-  response.write(`event: state\ndata: ${JSON.stringify(publicState(workspaceForUser(userId)))}\n\n`);
-}
-
-function broadcastState(userId) {
-  persistState();
-  clients.forEach((client, response) => {
-    const sessionIsValid = state.sessions.some((session) => (
-      session.tokenHash === client.tokenHash && Date.parse(session.expiresAt) > Date.now()
-    ));
-    if (!sessionIsValid) {
-      clients.delete(response);
-      response.end();
-      return;
+function broadcastStaff(userId) {
+  const nextState = store.state(userId);
+  staffClients.forEach((client, response) => {
+    if (client.userId !== userId) return;
+    try {
+      sendEvent(response, 'state', nextState);
+    } catch {
+      staffClients.delete(response);
     }
-    if (client.userId === userId) sendState(response, userId);
   });
 }
 
-function sanitizeUser(user) {
-  return user ? { id: user.id, username: user.username, createdAt: user.createdAt } : null;
+function broadcastPlate(numberPlateId) {
+  publicClients.forEach((client, response) => {
+    if (client.numberPlateId !== numberPlateId) return;
+    try {
+      sendEvent(response, 'changed', { at: nowIso() });
+    } catch {
+      publicClients.delete(response);
+    }
+  });
+}
+
+function broadcastUserPlates(userId) {
+  database.prepare('SELECT id FROM number_plates WHERE user_id = ?').all(userId)
+    .forEach((row) => broadcastPlate(row.id));
 }
 
 function currentSession(request) {
   const token = readCookie(request, SESSION_COOKIE);
   if (!token) return null;
   const tokenHash = hashToken(token);
-  const session = state.sessions.find((item) => item.tokenHash === tokenHash && Date.parse(item.expiresAt) > Date.now());
+  const session = store.findSession(tokenHash);
   if (!session) return null;
-  const user = state.users.find((item) => item.id === session.userId);
+  const user = store.findUserById(session.userId);
   return user ? { session, user, tokenHash } : null;
 }
 
@@ -171,148 +80,221 @@ function requireAuth(request, response, next) {
   if (!auth) return response.status(401).json({ message: '请先登录。' });
   request.authUser = auth.user;
   request.authSession = auth.session;
-  request.workspace = workspaceForUser(auth.user.id);
   return next();
 }
 
 function issueSession(request, response, user) {
   const { token, tokenHash } = createSessionToken();
   const createdAt = nowIso();
-  state.sessions.push({
-    id: createId('session'),
-    userId: user.id,
+  store.createSession({
     tokenHash,
+    userId: user.id,
     createdAt,
     expiresAt: new Date(Date.now() + SESSION_DURATION_MS).toISOString(),
   });
   response.setHeader('Set-Cookie', createSessionCookie(request, token, Math.floor(SESSION_DURATION_MS / 1000)));
 }
 
-function closeSessionClients(tokenHashToClose) {
-  clients.forEach((client, response) => {
-    if (client.tokenHash !== tokenHashToClose) return;
-    clients.delete(response);
+function closeSessionClients(tokenHash) {
+  staffClients.forEach((client, response) => {
+    if (client.tokenHash !== tokenHash) return;
+    staffClients.delete(response);
     response.end();
   });
 }
 
-function archiveOrder(workspace, order) {
-  const completedOrder = { ...order, status: 'completed', completedAt: nowIso() };
-  workspace.history.unshift(completedOrder);
-  return completedOrder;
+function asyncHandler(handler) {
+  return (request, response, next) => Promise.resolve(handler(request, response, next)).catch(next);
 }
 
-function parseDish(workspace, body, existing = {}) {
-  const group = body.group === undefined ? existing.group : body.group;
-  const name = body.name === undefined ? existing.name : body.name;
-  const note = body.note === undefined ? existing.note : body.note;
-  const priceCents = body.priceCents === undefined ? existing.priceCents : body.priceCents;
-  const active = body.active === undefined ? existing.active : body.active;
-  const allowedAddOnIds = body.allowedAddOnIds === undefined ? existing.allowedAddOnIds ?? [] : body.allowedAddOnIds;
-  if (typeof group !== 'string' || !group.trim() || group.trim().length > 30) return null;
-  if (typeof name !== 'string' || !name.trim() || name.trim().length > 60) return null;
-  if (typeof note !== 'string' || note.trim().length > 100) return null;
-  if (!Number.isInteger(priceCents) || priceCents < 0 || priceCents > 1_000_000) return null;
-  if (typeof active !== 'boolean') return null;
-  if (!Array.isArray(allowedAddOnIds) || allowedAddOnIds.some((id) => typeof id !== 'string')) return null;
-  const uniqueAddOnIds = [...new Set(allowedAddOnIds)];
-  if (uniqueAddOnIds.some((id) => !workspace.addOns.some((item) => item.id === id))) return null;
-  return {
-    ...existing,
-    group: group.trim(),
-    name: name.trim(),
-    note: note.trim(),
-    priceCents,
-    active,
-    allowedAddOnIds: uniqueAddOnIds,
-    updatedAt: nowIso(),
-  };
+function parseTimeRange(query) {
+  const from = Date.parse(query.from);
+  const to = Date.parse(query.to);
+  return Number.isFinite(from) && Number.isFinite(to) && from < to ? { from, to } : null;
 }
 
-function parseAddOn(body, existing = {}) {
-  const name = body.name === undefined ? existing.name : body.name;
-  const priceCents = body.priceCents === undefined ? existing.priceCents : body.priceCents;
-  const active = body.active === undefined ? existing.active : body.active;
-  if (typeof name !== 'string' || !name.trim() || name.trim().length > 40) return null;
-  if (!Number.isInteger(priceCents) || priceCents < 0 || priceCents > 1_000_000) return null;
-  if (typeof active !== 'boolean') return null;
-  return { ...existing, name: name.trim(), priceCents, active, updatedAt: nowIso() };
+function normalizedPublicToken(value) {
+  const token = typeof value === 'string' ? value.toUpperCase() : '';
+  return TOKEN_PATTERN.test(token) ? token : '';
 }
 
-function reorderItems(items, ids) {
-  if (!Array.isArray(ids) || ids.length !== items.length || ids.some((id) => typeof id !== 'string')) return null;
-  const requestedIds = new Set(ids);
-  if (requestedIds.size !== items.length || items.some((item) => !requestedIds.has(item.id))) return null;
-  const itemsById = new Map(items.map((item) => [item.id, item]));
-  return ids.map((id) => itemsById.get(id));
+function checkPublicRateLimit(request, token) {
+  const key = `${request.ip}:${token}`;
+  const timestamp = Date.now();
+  const current = publicRateLimits.get(key);
+  if (!current || timestamp - current.startedAt >= 60_000) {
+    publicRateLimits.set(key, { startedAt: timestamp, count: 1 });
+    return true;
+  }
+  current.count += 1;
+  return current.count <= 120;
+}
+
+function publicHeaders(response) {
+  response.set({
+    'Cache-Control': 'no-store',
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+  });
+}
+
+function sqliteConflict(response, error, fallbackMessage) {
+  if (String(error?.message).includes('UNIQUE constraint failed')) {
+    response.status(409).json({ message: fallbackMessage });
+    return true;
+  }
+  return false;
+}
+
+function validateCategoryName(value) {
+  return typeof value === 'string' && value.trim().length >= 1 && value.trim().length <= 30
+    ? value.trim()
+    : '';
+}
+
+function validatePrice(value) {
+  return Number.isInteger(value) && value >= 0 && value <= 1_000_000;
+}
+
+function resolveCategoryId(userId, body) {
+  if (typeof body.categoryId === 'string') {
+    return database.prepare('SELECT id FROM categories WHERE id = ? AND user_id = ?').get(body.categoryId, userId)?.id ?? '';
+  }
+  const group = validateCategoryName(body.group);
+  return group ? database.prepare('SELECT id FROM categories WHERE user_id = ? AND name = ?').get(userId, group)?.id ?? '' : '';
+}
+
+function validateAllowedAddOns(userId, ids) {
+  if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string')) return null;
+  const uniqueIds = [...new Set(ids)];
+  if (!uniqueIds.length) return [];
+  const rows = database.prepare(`
+    SELECT id FROM add_ons WHERE user_id = ? AND id IN (${uniqueIds.map(() => '?').join(', ')})
+  `).all(userId, ...uniqueIds);
+  return rows.length === uniqueIds.length ? uniqueIds : null;
+}
+
+function replaceDishAddOns(dishId, addOnIds) {
+  database.prepare('DELETE FROM dish_add_ons WHERE dish_id = ?').run(dishId);
+  const insert = database.prepare('INSERT INTO dish_add_ons (dish_id, add_on_id, sort_order) VALUES (?, ?, ?)');
+  addOnIds.forEach((addOnId, sortOrder) => insert.run(dishId, addOnId, sortOrder));
+}
+
+function parseDishBody(userId, body, existing = null) {
+  const categoryId = body.categoryId === undefined && body.group === undefined
+    ? existing?.category_id
+    : resolveCategoryId(userId, body);
+  const nameValue = body.name === undefined ? existing?.name : body.name;
+  const noteValue = body.note === undefined ? existing?.note : body.note;
+  const priceCents = body.priceCents === undefined ? existing?.price_cents : body.priceCents;
+  const active = body.active === undefined ? Boolean(existing?.active) : body.active;
+  const allowedAddOnIds = body.allowedAddOnIds === undefined
+    ? database.prepare('SELECT add_on_id FROM dish_add_ons WHERE dish_id = ? ORDER BY sort_order').all(existing?.id ?? '').map((row) => row.add_on_id)
+    : validateAllowedAddOns(userId, body.allowedAddOnIds);
+  const name = typeof nameValue === 'string' ? nameValue.trim() : '';
+  const note = typeof noteValue === 'string' ? noteValue.trim() : '';
+  if (!categoryId || !name || name.length > 60 || note.length > 100 || !validatePrice(priceCents) || typeof active !== 'boolean' || !allowedAddOnIds) return null;
+  return { categoryId, name, note, priceCents, active, allowedAddOnIds };
+}
+
+function parseAddOnBody(body, existing = null) {
+  const nameValue = body.name === undefined ? existing?.name : body.name;
+  const priceCents = body.priceCents === undefined ? existing?.price_cents : body.priceCents;
+  const active = body.active === undefined ? Boolean(existing?.active) : body.active;
+  const name = typeof nameValue === 'string' ? nameValue.trim() : '';
+  if (!name || name.length > 40 || !validatePrice(priceCents) || typeof active !== 'boolean') return null;
+  return { name, priceCents, active };
 }
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json({ limit: '64kb' }));
+app.set('trust proxy', 1);
+app.use(express.json({ limit: '256kb' }));
 
 app.get('/api/auth/me', (request, response) => {
   const auth = currentSession(request);
-  return response.json({ user: auth ? sanitizeUser(auth.user) : null });
+  response.json({ user: auth ? { id: auth.user.id, username: auth.user.username } : null });
 });
 
-app.post('/api/auth/register', async (request, response) => {
+app.post('/api/auth/register', asyncHandler(async (request, response) => {
   const username = normalizeUsername(request.body?.username);
-  const password = request.body?.password;
-  if (username.length < 3 || username.length > 32) {
-    return response.status(400).json({ message: '用户名需为 3 到 32 个字符。' });
-  }
-  if (typeof password !== 'string' || password.length < 8 || password.length > 128) {
-    return response.status(400).json({ message: '密码需为 8 到 128 个字符。' });
-  }
   const usernameNormalized = username.toLocaleLowerCase('zh-CN');
-  if (state.users.some((item) => item.usernameNormalized === usernameNormalized)) {
-    return response.status(409).json({ message: '该用户名已注册。' });
-  }
+  const password = typeof request.body?.password === 'string' ? request.body.password : '';
+  if (username.length < 3 || username.length > 32) return response.status(400).json({ message: '用户名需为 3 到 32 个字符。' });
+  if (password.length < 8 || password.length > 128) return response.status(400).json({ message: '密码需为 8 到 128 个字符。' });
+  if (store.findUserByNormalized(usernameNormalized)) return response.status(409).json({ message: '该用户名已被注册。' });
   const passwordRecord = await createPasswordRecord(password);
-  const user = {
-    id: createId('user'),
-    username,
-    usernameNormalized,
-    ...passwordRecord,
-    createdAt: nowIso(),
-  };
-  state.users.push(user);
-  state.workspaces[user.id] = createWorkspace();
-  issueSession(request, response, user);
-  persistState();
-  return response.status(201).json({ user: sanitizeUser(user) });
-});
-
-app.post('/api/auth/login', async (request, response) => {
-  const username = normalizeUsername(request.body?.username);
-  const password = request.body?.password;
-  const usernameNormalized = username.toLocaleLowerCase('zh-CN');
-  const user = state.users.find((item) => item.usernameNormalized === usernameNormalized);
-  if (!user || typeof password !== 'string' || !(await verifyPassword(password, user))) {
-    return response.status(401).json({ message: '用户名或密码不正确。' });
+  try {
+    const user = store.createUser({
+      id: createId('user'),
+      username,
+      usernameNormalized,
+      ...passwordRecord,
+      createdAt: nowIso(),
+    });
+    issueSession(request, response, user);
+    return response.status(201).json({ user: { id: user.id, username: user.username } });
+  } catch (error) {
+    if (sqliteConflict(response, error, '该用户名已被注册。')) return undefined;
+    throw error;
   }
-  workspaceForUser(user.id);
+}));
+
+app.post('/api/auth/login', asyncHandler(async (request, response) => {
+  const username = normalizeUsername(request.body?.username).toLocaleLowerCase('zh-CN');
+  const password = typeof request.body?.password === 'string' ? request.body.password : '';
+  const user = store.findUserByNormalized(username);
+  if (!user || !(await verifyPassword(password, user))) return response.status(401).json({ message: '用户名或密码不正确。' });
   issueSession(request, response, user);
-  persistState();
-  return response.json({ user: sanitizeUser(user) });
-});
+  return response.json({ user: { id: user.id, username: user.username } });
+}));
 
 app.post('/api/auth/logout', (request, response) => {
   const token = readCookie(request, SESSION_COOKIE);
-  const tokenHashToClose = token ? hashToken(token) : '';
-  if (tokenHashToClose) state.sessions = state.sessions.filter((item) => item.tokenHash !== tokenHashToClose);
+  const tokenHash = token ? hashToken(token) : '';
+  if (tokenHash) store.deleteSession(tokenHash);
   response.setHeader('Set-Cookie', createSessionCookie(request, '', 0));
-  persistState();
-  closeSessionClients(tokenHashToClose);
-  return response.json({ ok: true });
+  closeSessionClients(tokenHash);
+  response.json({ ok: true });
+});
+
+app.get('/api/public/plates/:token/progress', (request, response) => {
+  const token = normalizedPublicToken(request.params.token);
+  publicHeaders(response);
+  if (!token || !checkPublicRateLimit(request, token)) return response.status(token ? 429 : 404).json({ message: token ? '请求过于频繁，请稍后再试。' : '号牌不存在。' });
+  const progress = store.publicProgress(token);
+  return progress ? response.json(progress) : response.status(404).json({ message: '号牌不存在。' });
+});
+
+app.get('/api/public/plates/:token/events', (request, response) => {
+  const token = normalizedPublicToken(request.params.token);
+  const plate = token ? store.plateByToken(token) : null;
+  if (!plate) return response.status(404).end();
+  publicHeaders(response);
+  response.set({ 'Content-Type': 'text/event-stream', Connection: 'keep-alive' });
+  response.flushHeaders();
+  publicClients.set(response, { numberPlateId: plate.id });
+  sendEvent(response, 'changed', { at: nowIso() });
+  const heartbeat = setInterval(() => response.write(': keep-alive\n\n'), 25_000);
+  request.on('close', () => {
+    clearInterval(heartbeat);
+    publicClients.delete(response);
+  });
+});
+
+app.get('/api/public/plates/:token/payment-qr', (request, response) => {
+  const token = normalizedPublicToken(request.params.token);
+  publicHeaders(response);
+  if (!token) return response.status(404).end();
+  const image = store.paymentQrForToken(token);
+  if (!image?.data || !image.mime) return response.status(404).end();
+  response.type(image.mime);
+  return response.send(Buffer.from(image.data));
 });
 
 app.use('/api', requireAuth);
 
-app.get('/api/state', (request, response) => {
-  response.json(publicState(request.workspace));
-});
+app.get('/api/state', (request, response) => response.json(store.state(request.authUser.id)));
 
 app.get('/api/events', (request, response) => {
   response.set({
@@ -321,45 +303,338 @@ app.get('/api/events', (request, response) => {
     Connection: 'keep-alive',
   });
   response.flushHeaders();
-  clients.set(response, {
-    tokenHash: request.authSession.tokenHash,
-    userId: request.authUser.id,
-  });
-  sendState(response, request.authUser.id);
-
+  staffClients.set(response, { tokenHash: request.authSession.tokenHash, userId: request.authUser.id });
+  sendEvent(response, 'state', store.state(request.authUser.id));
   const heartbeat = setInterval(() => response.write(': keep-alive\n\n'), 25_000);
   request.on('close', () => {
     clearInterval(heartbeat);
-    clients.delete(response);
+    staffClients.delete(response);
   });
+});
+
+app.post('/api/categories', (request, response) => {
+  const name = validateCategoryName(request.body?.name);
+  if (!name) return response.status(400).json({ message: '大类名称不能为空且不能超过 30 个字符。' });
+  const sortOrder = Number(database.prepare('SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM categories WHERE user_id = ?').get(request.authUser.id).next);
+  const timestamp = nowIso();
+  const id = createId('category');
+  try {
+    database.prepare(`
+      INSERT INTO categories (id, user_id, name, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(id, request.authUser.id, name, sortOrder, timestamp, timestamp);
+  } catch (error) {
+    if (sqliteConflict(response, error, '已存在同名大类。')) return undefined;
+    throw error;
+  }
+  broadcastStaff(request.authUser.id);
+  return response.status(201).json(store.categories(request.authUser.id).find((item) => item.id === id));
+});
+
+app.patch('/api/categories/:id', (request, response) => {
+  const name = validateCategoryName(request.body?.name);
+  if (!name) return response.status(400).json({ message: '大类名称不能为空且不能超过 30 个字符。' });
+  try {
+    const result = database.prepare(`
+      UPDATE categories SET name = ?, updated_at = ? WHERE id = ? AND user_id = ?
+    `).run(name, nowIso(), request.params.id, request.authUser.id);
+    if (!result.changes) return response.status(404).json({ message: '菜品大类不存在。' });
+  } catch (error) {
+    if (sqliteConflict(response, error, '已存在同名大类。')) return undefined;
+    throw error;
+  }
+  broadcastStaff(request.authUser.id);
+  return response.json(store.categories(request.authUser.id).find((item) => item.id === request.params.id));
+});
+
+app.put('/api/categories/order', (request, response) => {
+  const ids = request.body?.ids;
+  const current = store.categories(request.authUser.id).map((item) => item.id);
+  if (!Array.isArray(ids) || ids.length !== current.length || new Set(ids).size !== current.length || current.some((id) => !ids.includes(id))) {
+    return response.status(400).json({ message: '大类顺序无效，请刷新后重试。' });
+  }
+  withTransaction(database, () => ids.forEach((id, sortOrder) => database.prepare(`
+    UPDATE categories SET sort_order = ?, updated_at = ? WHERE id = ? AND user_id = ?
+  `).run(sortOrder, nowIso(), id, request.authUser.id)));
+  broadcastStaff(request.authUser.id);
+  return response.json({ ok: true });
+});
+
+app.post('/api/dishes', (request, response) => {
+  const parsed = parseDishBody(request.authUser.id, request.body ?? {});
+  if (!parsed) return response.status(400).json({ message: '请检查菜品大类、名称、价格和可选小料。' });
+  const id = createId('dish');
+  const timestamp = nowIso();
+  const sortOrder = Number(database.prepare('SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM dishes WHERE user_id = ?').get(request.authUser.id).next);
+  try {
+    withTransaction(database, () => {
+      database.prepare(`
+        INSERT INTO dishes (id, user_id, category_id, name, note, price_cents, active, sort_order, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, request.authUser.id, parsed.categoryId, parsed.name, parsed.note, parsed.priceCents, parsed.active ? 1 : 0, sortOrder, timestamp, timestamp);
+      replaceDishAddOns(id, parsed.allowedAddOnIds);
+    });
+  } catch (error) {
+    if (sqliteConflict(response, error, '同一大类中已存在同名菜品。')) return undefined;
+    throw error;
+  }
+  broadcastStaff(request.authUser.id);
+  return response.status(201).json(store.dishes(request.authUser.id).find((item) => item.id === id));
+});
+
+app.patch('/api/dishes/:id', (request, response) => {
+  const existing = database.prepare('SELECT * FROM dishes WHERE id = ? AND user_id = ?').get(request.params.id, request.authUser.id);
+  if (!existing) return response.status(404).json({ message: '菜品不存在。' });
+  const parsed = parseDishBody(request.authUser.id, request.body ?? {}, existing);
+  if (!parsed) return response.status(400).json({ message: '请检查菜品大类、名称、价格和可选小料。' });
+  try {
+    withTransaction(database, () => {
+      database.prepare(`
+        UPDATE dishes SET category_id = ?, name = ?, note = ?, price_cents = ?, active = ?, updated_at = ?
+        WHERE id = ? AND user_id = ?
+      `).run(parsed.categoryId, parsed.name, parsed.note, parsed.priceCents, parsed.active ? 1 : 0, nowIso(), request.params.id, request.authUser.id);
+      replaceDishAddOns(request.params.id, parsed.allowedAddOnIds);
+    });
+  } catch (error) {
+    if (sqliteConflict(response, error, '同一大类中已存在同名菜品。')) return undefined;
+    throw error;
+  }
+  broadcastStaff(request.authUser.id);
+  return response.json(store.dishes(request.authUser.id).find((item) => item.id === request.params.id));
+});
+
+app.delete('/api/dishes/:id', (request, response) => {
+  const result = database.prepare('DELETE FROM dishes WHERE id = ? AND user_id = ?').run(request.params.id, request.authUser.id);
+  if (!result.changes) return response.status(404).json({ message: '菜品不存在。' });
+  broadcastStaff(request.authUser.id);
+  return response.json({ ok: true });
+});
+
+app.put('/api/dishes/order', (request, response) => {
+  const ids = request.body?.ids;
+  const current = store.dishes(request.authUser.id).map((item) => item.id);
+  if (!Array.isArray(ids) || ids.length !== current.length || new Set(ids).size !== current.length || current.some((id) => !ids.includes(id))) {
+    return response.status(400).json({ message: '菜品顺序无效，请刷新后重试。' });
+  }
+  withTransaction(database, () => ids.forEach((id, sortOrder) => database.prepare(`
+    UPDATE dishes SET sort_order = ?, updated_at = ? WHERE id = ? AND user_id = ?
+  `).run(sortOrder, nowIso(), id, request.authUser.id)));
+  broadcastStaff(request.authUser.id);
+  return response.json({ ok: true });
+});
+
+app.post('/api/add-ons', (request, response) => {
+  const parsed = parseAddOnBody(request.body ?? {});
+  if (!parsed) return response.status(400).json({ message: '请检查小料名称和价格。' });
+  const id = createId('addon');
+  const timestamp = nowIso();
+  const sortOrder = Number(database.prepare('SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM add_ons WHERE user_id = ?').get(request.authUser.id).next);
+  try {
+    database.prepare(`
+      INSERT INTO add_ons (id, user_id, name, price_cents, active, sort_order, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, request.authUser.id, parsed.name, parsed.priceCents, parsed.active ? 1 : 0, sortOrder, timestamp, timestamp);
+  } catch (error) {
+    if (sqliteConflict(response, error, '已存在同名小料。')) return undefined;
+    throw error;
+  }
+  broadcastStaff(request.authUser.id);
+  return response.status(201).json(store.addOns(request.authUser.id).find((item) => item.id === id));
+});
+
+app.patch('/api/add-ons/:id', (request, response) => {
+  const existing = database.prepare('SELECT * FROM add_ons WHERE id = ? AND user_id = ?').get(request.params.id, request.authUser.id);
+  if (!existing) return response.status(404).json({ message: '小料不存在。' });
+  const parsed = parseAddOnBody(request.body ?? {}, existing);
+  if (!parsed) return response.status(400).json({ message: '请检查小料名称和价格。' });
+  try {
+    database.prepare(`
+      UPDATE add_ons SET name = ?, price_cents = ?, active = ?, updated_at = ? WHERE id = ? AND user_id = ?
+    `).run(parsed.name, parsed.priceCents, parsed.active ? 1 : 0, nowIso(), request.params.id, request.authUser.id);
+  } catch (error) {
+    if (sqliteConflict(response, error, '已存在同名小料。')) return undefined;
+    throw error;
+  }
+  broadcastStaff(request.authUser.id);
+  return response.json(store.addOns(request.authUser.id).find((item) => item.id === request.params.id));
+});
+
+app.delete('/api/add-ons/:id', (request, response) => {
+  const result = database.prepare('DELETE FROM add_ons WHERE id = ? AND user_id = ?').run(request.params.id, request.authUser.id);
+  if (!result.changes) return response.status(404).json({ message: '小料不存在。' });
+  broadcastStaff(request.authUser.id);
+  return response.json({ ok: true });
+});
+
+app.put('/api/add-ons/order', (request, response) => {
+  const ids = request.body?.ids;
+  const current = store.addOns(request.authUser.id).map((item) => item.id);
+  if (!Array.isArray(ids) || ids.length !== current.length || new Set(ids).size !== current.length || current.some((id) => !ids.includes(id))) {
+    return response.status(400).json({ message: '小料顺序无效，请刷新后重试。' });
+  }
+  withTransaction(database, () => ids.forEach((id, sortOrder) => database.prepare(`
+    UPDATE add_ons SET sort_order = ?, updated_at = ? WHERE id = ? AND user_id = ?
+  `).run(sortOrder, nowIso(), id, request.authUser.id)));
+  broadcastStaff(request.authUser.id);
+  return response.json({ ok: true });
+});
+
+app.patch('/api/settings', (request, response) => {
+  const userId = request.authUser.id;
+  if (request.body?.sound !== undefined) {
+    database.prepare('UPDATE merchant_settings SET sound_enabled = ? WHERE user_id = ?').run(request.body.sound ? 1 : 0, userId);
+  }
+  if (request.body?.availableNumbers !== undefined) {
+    const numbers = request.body.availableNumbers;
+    if (!Array.isArray(numbers) || !numbers.length || numbers.some((number) => !Number.isInteger(number) || number < 1 || number > 999)) {
+      return response.status(400).json({ message: '号牌清单无效，请至少保留一个 1 到 999 之间的号码。' });
+    }
+    const requested = [...new Set(numbers)].sort((a, b) => a - b);
+    const current = store.numberPlates(userId);
+    const requestedSet = new Set(requested);
+    const blocked = current.find((plate) => !requestedSet.has(plate.number) && plate.activeBillId);
+    if (blocked) return response.status(409).json({ message: `${blocked.number} 号牌还有未结算账单，不能移除。` });
+    withTransaction(database, () => {
+      current.filter((plate) => !requestedSet.has(plate.number)).forEach((plate) => {
+        database.prepare('DELETE FROM number_plates WHERE id = ? AND user_id = ?').run(plate.id, userId);
+      });
+      const existingNumbers = new Set(current.map((plate) => plate.number));
+      requested.filter((number) => !existingNumbers.has(number)).forEach((number, index) => store.createPlate(userId, number, current.length + index));
+      requested.forEach((number, sortOrder) => database.prepare(`
+        UPDATE number_plates SET sort_order = ? WHERE user_id = ? AND number = ?
+      `).run(sortOrder, userId, number));
+    });
+  }
+  broadcastStaff(userId);
+  return response.json(store.state(userId).settings);
+});
+
+app.post('/api/settings/payment-qr', express.raw({ type: ['image/png', 'image/jpeg', 'image/webp'], limit: '2mb' }), (request, response) => {
+  if (!Buffer.isBuffer(request.body) || !request.body.length) return response.status(400).json({ message: '请选择 PNG、JPEG 或 WebP 收款码图片。' });
+  const mime = request.get('content-type')?.split(';')[0];
+  if (!['image/png', 'image/jpeg', 'image/webp'].includes(mime)) return response.status(415).json({ message: '收款码仅支持 PNG、JPEG 或 WebP。' });
+  database.prepare(`
+    UPDATE merchant_settings SET payment_qr_blob = ?, payment_qr_mime = ?, payment_qr_updated_at = ? WHERE user_id = ?
+  `).run(request.body, mime, nowIso(), request.authUser.id);
+  broadcastStaff(request.authUser.id);
+  broadcastUserPlates(request.authUser.id);
+  return response.json({ ok: true });
+});
+
+app.get('/api/settings/payment-qr', (request, response) => {
+  const image = store.paymentQrForUser(request.authUser.id);
+  if (!image?.data || !image.mime) return response.status(404).end();
+  response.set('Cache-Control', 'private, no-store');
+  response.type(image.mime);
+  return response.send(Buffer.from(image.data));
+});
+
+app.delete('/api/settings/payment-qr', (request, response) => {
+  database.prepare(`
+    UPDATE merchant_settings SET payment_qr_blob = NULL, payment_qr_mime = NULL, payment_qr_updated_at = NULL WHERE user_id = ?
+  `).run(request.authUser.id);
+  broadcastStaff(request.authUser.id);
+  broadcastUserPlates(request.authUser.id);
+  return response.json({ ok: true });
+});
+
+app.get('/api/number-plates/:id/qr.svg', asyncHandler(async (request, response) => {
+  const plate = database.prepare('SELECT * FROM number_plates WHERE id = ? AND user_id = ?').get(request.params.id, request.authUser.id);
+  if (!plate) return response.status(404).json({ message: '号牌不存在。' });
+  const configuredBase = process.env.PUBLIC_BASE_URL?.trim().replace(/\/$/, '');
+  const fallbackBase = `${request.protocol}://${request.get('host')}`;
+  const target = `${configuredBase || fallbackBase}/Q/${plate.public_token}`.toUpperCase();
+  const svg = await QRCode.toString(target, {
+    type: 'svg',
+    errorCorrectionLevel: 'M',
+    margin: 4,
+    color: { dark: '#000000', light: '#FFFFFFFF' },
+  });
+  response.set({
+    'Content-Type': 'image/svg+xml; charset=utf-8',
+    'Content-Disposition': `attachment; filename="number-plate-${plate.number}.svg"`,
+    'Cache-Control': 'private, no-store',
+  });
+  return response.send(svg);
+}));
+
+app.post('/api/number-plates/:id/items', (request, response) => {
+  const { dishId, addOnIds = [], quantity = 1 } = request.body ?? {};
+  if (typeof dishId !== 'string' || !Array.isArray(addOnIds) || addOnIds.some((id) => typeof id !== 'string') || !Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
+    return response.status(400).json({ message: '请检查菜品、小料和份数。' });
+  }
+  const created = store.createBillItem(request.authUser.id, { numberPlateId: request.params.id, dishId, addOnIds, quantity });
+  broadcastStaff(request.authUser.id);
+  broadcastPlate(created.numberPlateId);
+  return response.status(201).json(store.bill(request.authUser.id, created.billId));
+});
+
+app.post('/api/orders', (request, response) => {
+  const { number, dishId, addOnIds = [], quantity = 1 } = request.body ?? {};
+  const plate = Number.isInteger(number) ? database.prepare(`
+    SELECT id FROM number_plates WHERE user_id = ? AND number = ?
+  `).get(request.authUser.id, number) : null;
+  if (!plate) return response.status(400).json({ message: '订单号牌或菜品无效。' });
+  if (typeof dishId !== 'string' || !Array.isArray(addOnIds) || !Number.isInteger(quantity) || quantity < 1 || quantity > 99) return response.status(400).json({ message: '请检查菜品、小料和份数。' });
+  const created = store.createBillItem(request.authUser.id, { numberPlateId: plate.id, dishId, addOnIds, quantity });
+  broadcastStaff(request.authUser.id);
+  broadcastPlate(created.numberPlateId);
+  return response.status(201).json(store.bill(request.authUser.id, created.billId));
+});
+
+function handleTaskAction(request, response) {
+  const updated = store.updateTask(request.authUser.id, request.params.id, request.body?.action);
+  broadcastStaff(request.authUser.id);
+  if (updated.numberPlateId) broadcastPlate(updated.numberPlateId);
+  return response.json(updated);
+}
+
+function handleBatchAction(request, response) {
+  let sourceDishId = request.body?.sourceDishId;
+  if (!sourceDishId && typeof request.body?.category === 'string') {
+    sourceDishId = database.prepare(`
+      SELECT source_dish_id FROM bill_items WHERE user_id = ? AND dish_name_snapshot = ? ORDER BY created_at DESC LIMIT 1
+    `).get(request.authUser.id, request.body.category)?.source_dish_id;
+  }
+  if (typeof sourceDishId !== 'string') return response.status(400).json({ message: '请选择要处理的菜品。' });
+  const result = store.batchUpdateTasks(request.authUser.id, sourceDishId, request.body?.action);
+  broadcastStaff(request.authUser.id);
+  result.numberPlateIds.forEach(broadcastPlate);
+  return response.json({ updated: result.updated });
+}
+
+app.patch('/api/kitchen/tasks/batch', handleBatchAction);
+app.patch('/api/orders/batch', handleBatchAction);
+app.patch('/api/kitchen/tasks/:id', handleTaskAction);
+app.patch('/api/orders/:id', handleTaskAction);
+
+app.get('/api/bills', (request, response) => {
+  const status = request.query.status;
+  if (!['open', 'settled'].includes(status)) return response.status(400).json({ message: '账单状态无效。' });
+  const limit = status === 'settled' ? Math.min(200, Math.max(1, Number(request.query.limit) || 100)) : undefined;
+  return response.json({ bills: store.bills(request.authUser.id, { status, limit }) });
+});
+
+app.post('/api/bills/:id/settle', (request, response) => {
+  const result = store.settleBill(request.authUser.id, request.params.id);
+  broadcastStaff(request.authUser.id);
+  if (result.numberPlateId) broadcastPlate(result.numberPlateId);
+  return response.json({ ...result, bill: store.bill(request.authUser.id, request.params.id) });
 });
 
 app.get('/api/analytics', (request, response) => {
-  const from = Date.parse(request.query.from);
-  const to = Date.parse(request.query.to);
-  if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) {
-    return response.status(400).json({ message: '请选择有效的统计时间范围。' });
-  }
-  return response.json(buildAnalytics(request.workspace.history, from, to));
+  const range = parseTimeRange(request.query);
+  if (!range) return response.status(400).json({ message: '请选择有效的统计时间范围。' });
+  const bills = store.bills(request.authUser.id, { status: 'settled', ...range });
+  return response.json(buildAnalytics(bills, range.from, range.to));
 });
 
 app.get('/api/order-exports', (request, response) => {
-  const from = Date.parse(request.query.from);
-  const to = Date.parse(request.query.to);
+  const range = parseTimeRange(request.query);
   const format = request.query.format;
-  if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) {
-    return response.status(400).json({ message: '请选择有效的导出时间范围。' });
-  }
-  if (!['csv', 'json'].includes(format)) {
-    return response.status(400).json({ message: '导出格式仅支持 CSV 或 JSON。' });
-  }
-  const exported = buildOrderExport({
-    history: request.workspace.history,
-    from,
-    to,
-    format,
-    user: request.authUser,
-  });
+  if (!range) return response.status(400).json({ message: '请选择有效的导出时间范围。' });
+  if (!['csv', 'json'].includes(format)) return response.status(400).json({ message: '导出格式仅支持 CSV 或 JSON。' });
+  const bills = store.bills(request.authUser.id, { status: 'settled', ...range });
+  const exported = buildOrderExport({ bills, ...range, format, user: request.authUser });
   response.set({
     'Content-Type': exported.contentType,
     'Content-Disposition': `attachment; filename="${exported.filename}"`,
@@ -369,223 +644,10 @@ app.get('/api/order-exports', (request, response) => {
   return response.send(exported.body);
 });
 
-app.post('/api/orders', (request, response) => {
-  const workspace = request.workspace;
-  const { number, dishId, addOnIds = [], quantity = 1 } = request.body ?? {};
-  if (!Number.isInteger(number) || number < 1 || number > 999 || typeof dishId !== 'string') {
-    return response.status(400).json({ message: '订单号码或菜品无效。' });
-  }
-  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
-    return response.status(400).json({ message: '菜品份数需为 1 到 99 之间的整数。' });
-  }
-  if (!workspace.settings.availableNumbers.includes(number)) {
-    return response.status(409).json({ message: `${number}号牌未启用，请在设置中添加后再下单。` });
-  }
-  if (workspace.queue.some((item) => item.number === number)) {
-    return response.status(409).json({ message: `${number}号正在使用中，请选择其他号码。` });
-  }
-  const dish = workspace.dishes.find((item) => item.id === dishId && item.active);
-  if (!dish) return response.status(409).json({ message: '该菜品已停用或删除，请重新选择。' });
-  if (!Array.isArray(addOnIds) || addOnIds.some((item) => typeof item !== 'string')) {
-    return response.status(400).json({ message: '加料数据无效。' });
-  }
-  const uniqueAddOnIds = [...new Set(addOnIds)];
-  const selectedAddOns = uniqueAddOnIds.map((id) => workspace.addOns.find((item) => item.id === id && item.active));
-  if (selectedAddOns.some((item) => !item)) {
-    return response.status(409).json({ message: '部分加料已停用或删除，请重新选择。' });
-  }
-  if (uniqueAddOnIds.some((id) => !dish.allowedAddOnIds.includes(id))) {
-    return response.status(409).json({ message: '所选小料不适用于该菜品，请重新选择。' });
-  }
-
-  const unitTotalCents = dish.priceCents
-    + selectedAddOns.reduce((sum, item) => sum + item.priceCents, 0);
-
-  const order = {
-    id: createId('order'),
-    number,
-    dishId: dish.id,
-    category: dish.name,
-    dishGroup: dish.group,
-    priceCents: dish.priceCents,
-    quantity,
-    addOns: selectedAddOns.map((item) => ({ id: item.id, name: item.name, priceCents: item.priceCents })),
-    extras: selectedAddOns.map((item) => item.name),
-    totalCents: unitTotalCents * quantity,
-    status: 'waiting',
-    createdAt: nowIso(),
-  };
-
-  workspace.queue.push(order);
-  broadcastState(request.authUser.id);
-  return response.status(201).json(order);
-});
-
-app.patch('/api/orders/batch', (request, response) => {
-  const workspace = request.workspace;
-  const { category, action } = request.body ?? {};
-  if (typeof category !== 'string' || !category.trim()) {
-    return response.status(400).json({ message: '请选择要批量处理的品类。' });
-  }
-
-  let updated = 0;
-  if (action === 'start') {
-    workspace.queue = workspace.queue.map((item) => {
-      if (item.category !== category || item.status !== 'waiting') return item;
-      updated += 1;
-      return { ...item, status: 'making', startedAt: nowIso() };
-    });
-  } else if (action === 'complete') {
-    workspace.queue = workspace.queue.filter((item) => {
-      const shouldComplete = item.category === category && item.status === 'making';
-      if (shouldComplete) {
-        updated += 1;
-        archiveOrder(workspace, item);
-      }
-      return !shouldComplete;
-    });
-  } else {
-    return response.status(400).json({ message: '不支持的批量出餐操作。' });
-  }
-
-  if (updated > 0) broadcastState(request.authUser.id);
-  return response.json({ updated });
-});
-
-app.patch('/api/orders/:id', (request, response) => {
-  const workspace = request.workspace;
-  const orderIndex = workspace.queue.findIndex((item) => item.id === request.params.id);
-  if (orderIndex === -1) return response.status(404).json({ message: '订单不存在或已完成。' });
-
-  const action = request.body?.action;
-  if (action === 'start') {
-    workspace.queue[orderIndex] = { ...workspace.queue[orderIndex], status: 'making', startedAt: nowIso() };
-  } else if (action === 'complete') {
-    const [completedOrder] = workspace.queue.splice(orderIndex, 1);
-    archiveOrder(workspace, completedOrder);
-  } else {
-    return response.status(400).json({ message: '不支持的出餐操作。' });
-  }
-
-  broadcastState(request.authUser.id);
-  return response.json({ ok: true });
-});
-
-app.post('/api/dishes', (request, response) => {
-  const workspace = request.workspace;
-  const dish = parseDish(workspace, request.body, { active: true });
-  if (!dish) return response.status(400).json({ message: '请检查菜品名称、分组和价格。' });
-  const duplicate = workspace.dishes.some((item) => item.group === dish.group && item.name === dish.name);
-  if (duplicate) return response.status(409).json({ message: '同一分组中已存在同名菜品。' });
-  const created = { ...dish, id: createId('dish'), createdAt: nowIso() };
-  workspace.dishes.push(created);
-  broadcastState(request.authUser.id);
-  return response.status(201).json(created);
-});
-
-app.put('/api/dishes/order', (request, response) => {
-  const workspace = request.workspace;
-  const reordered = reorderItems(workspace.dishes, request.body?.ids);
-  if (!reordered) return response.status(400).json({ message: '菜品顺序无效，请刷新后重试。' });
-  workspace.dishes = reordered;
-  broadcastState(request.authUser.id);
-  return response.json({ ok: true });
-});
-
-app.patch('/api/dishes/:id', (request, response) => {
-  const workspace = request.workspace;
-  const index = workspace.dishes.findIndex((item) => item.id === request.params.id);
-  if (index === -1) return response.status(404).json({ message: '菜品不存在。' });
-  const dish = parseDish(workspace, request.body, workspace.dishes[index]);
-  if (!dish) return response.status(400).json({ message: '请检查菜品名称、分组和价格。' });
-  const duplicate = workspace.dishes.some((item, itemIndex) => itemIndex !== index && item.group === dish.group && item.name === dish.name);
-  if (duplicate) return response.status(409).json({ message: '同一分组中已存在同名菜品。' });
-  workspace.dishes[index] = dish;
-  broadcastState(request.authUser.id);
-  return response.json(dish);
-});
-
-app.delete('/api/dishes/:id', (request, response) => {
-  const workspace = request.workspace;
-  const index = workspace.dishes.findIndex((item) => item.id === request.params.id);
-  if (index === -1) return response.status(404).json({ message: '菜品不存在。' });
-  workspace.dishes.splice(index, 1);
-  broadcastState(request.authUser.id);
-  return response.json({ ok: true });
-});
-
-app.post('/api/add-ons', (request, response) => {
-  const workspace = request.workspace;
-  const addOn = parseAddOn(request.body, { active: true });
-  if (!addOn) return response.status(400).json({ message: '请检查加料名称和价格。' });
-  if (workspace.addOns.some((item) => item.name === addOn.name)) {
-    return response.status(409).json({ message: '已存在同名加料。' });
-  }
-  const created = { ...addOn, id: createId('addon'), createdAt: nowIso() };
-  workspace.addOns.push(created);
-  broadcastState(request.authUser.id);
-  return response.status(201).json(created);
-});
-
-app.put('/api/add-ons/order', (request, response) => {
-  const workspace = request.workspace;
-  const reordered = reorderItems(workspace.addOns, request.body?.ids);
-  if (!reordered) return response.status(400).json({ message: '小料顺序无效，请刷新后重试。' });
-  workspace.addOns = reordered;
-  broadcastState(request.authUser.id);
-  return response.json({ ok: true });
-});
-
-app.patch('/api/add-ons/:id', (request, response) => {
-  const workspace = request.workspace;
-  const index = workspace.addOns.findIndex((item) => item.id === request.params.id);
-  if (index === -1) return response.status(404).json({ message: '加料不存在。' });
-  const addOn = parseAddOn(request.body, workspace.addOns[index]);
-  if (!addOn) return response.status(400).json({ message: '请检查加料名称和价格。' });
-  const duplicate = workspace.addOns.some((item, itemIndex) => itemIndex !== index && item.name === addOn.name);
-  if (duplicate) return response.status(409).json({ message: '已存在同名加料。' });
-  workspace.addOns[index] = addOn;
-  broadcastState(request.authUser.id);
-  return response.json(addOn);
-});
-
-app.delete('/api/add-ons/:id', (request, response) => {
-  const workspace = request.workspace;
-  const index = workspace.addOns.findIndex((item) => item.id === request.params.id);
-  if (index === -1) return response.status(404).json({ message: '加料不存在。' });
-  const [removed] = workspace.addOns.splice(index, 1);
-  workspace.dishes = workspace.dishes.map((dish) => ({
-    ...dish,
-    allowedAddOnIds: dish.allowedAddOnIds.filter((id) => id !== removed.id),
-    updatedAt: nowIso(),
-  }));
-  broadcastState(request.authUser.id);
-  return response.json({ ok: true });
-});
-
-app.patch('/api/settings', (request, response) => {
-  const workspace = request.workspace;
-  const nextSettings = { ...workspace.settings };
-  if (request.body?.sortMode !== undefined) {
-    if (!['time', 'category'].includes(request.body.sortMode)) {
-      return response.status(400).json({ message: '排序设置无效。' });
-    }
-    nextSettings.sortMode = request.body.sortMode;
-  }
-  if (request.body?.sound !== undefined) nextSettings.sound = Boolean(request.body.sound);
-  if (request.body?.availableNumbers !== undefined) {
-    const availableNumbers = request.body.availableNumbers;
-    const hasInvalidNumber = !Array.isArray(availableNumbers)
-      || availableNumbers.some((item) => !Number.isInteger(item) || item < 1 || item > 999);
-    if (hasInvalidNumber || availableNumbers.length === 0) {
-      return response.status(400).json({ message: '号牌清单无效，请至少保留一个 1 到 999 之间的号码。' });
-    }
-    nextSettings.availableNumbers = [...new Set(availableNumbers)].sort((a, b) => a - b);
-  }
-
-  workspace.settings = nextSettings;
-  broadcastState(request.authUser.id);
-  return response.json(workspace.settings);
+app.use((error, _request, response, _next) => {
+  console.error(error);
+  const status = Number(error?.status) || 500;
+  response.status(status).json({ message: status === 500 ? '服务器处理失败，请稍后再试。' : error.message });
 });
 
 const distDirectory = join(projectRoot, 'dist');
@@ -594,6 +656,8 @@ if (existsSync(distDirectory)) {
   app.get(/.*/, (_request, response) => response.sendFile(join(distDirectory, 'index.html')));
 }
 
-app.listen(port, '0.0.0.0', () => {
+export const server = app.listen(port, '0.0.0.0', () => {
   console.log(`餐厅工作台服务已启动: http://0.0.0.0:${port}`);
 });
+
+export { app };

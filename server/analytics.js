@@ -10,33 +10,31 @@ function aggregateBy(items, keySelector, valueSelector = () => 1) {
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-CN'));
 }
 
-function orderQuantity(order) {
-  return Number.isInteger(order.quantity) && order.quantity >= 1 ? order.quantity : 1;
+export function settledBillsInRange(bills, from, to) {
+  return bills.filter((bill) => {
+    const settledAt = Date.parse(bill.settledAt);
+    return bill.status === 'settled' && Number.isFinite(settledAt) && settledAt >= from && settledAt < to;
+  });
 }
 
-export function buildAnalytics(history, from, to) {
-  const orders = completedOrdersInRange(history, from, to);
-  const revenueCents = orders.reduce((sum, order) => sum + (order.totalCents ?? 0), 0);
-  const addOnRows = orders.flatMap((order) => (
-    (order.addOns ?? []).map((addOn) => ({ ...addOn, quantity: orderQuantity(order) }))
-  ));
+export function buildAnalytics(sourceBills, from, to) {
+  const bills = settledBillsInRange(sourceBills, from, to);
+  const items = bills.flatMap((bill) => bill.items ?? []);
+  const revenueCents = bills.reduce((sum, bill) => sum + (bill.totalCents ?? 0), 0);
+  const addOnRows = items.flatMap((item) => (item.addOns ?? []).map((addOn) => ({
+    ...addOn,
+    quantity: item.quantity ?? 1,
+  })));
   return {
     range: { from: new Date(from).toISOString(), to: new Date(to).toISOString() },
     summary: {
       revenueCents,
-      orderCount: orders.length,
-      averageOrderCents: orders.length ? Math.round(revenueCents / orders.length) : 0,
-      addOnCount: addOnRows.reduce((sum, addOn) => sum + addOn.quantity, 0),
+      orderCount: bills.length,
+      averageOrderCents: bills.length ? Math.round(revenueCents / bills.length) : 0,
+      dishCount: items.reduce((sum, item) => sum + (item.quantity ?? 1), 0),
     },
-    categories: aggregateBy(orders, (order) => order.dishGroup || '未分类', orderQuantity),
-    dishes: aggregateBy(orders, (order) => order.category, orderQuantity),
-    addOns: aggregateBy(addOnRows, (addOn) => addOn.name, (addOn) => addOn.quantity),
+    categories: aggregateBy(items, (item) => item.dishGroup || '未分类', (item) => item.quantity ?? 1),
+    dishes: aggregateBy(items, (item) => item.dishName || item.category, (item) => item.quantity ?? 1),
+    addOns: aggregateBy(addOnRows, (item) => item.name, (item) => item.quantity),
   };
-}
-
-export function completedOrdersInRange(history, from, to) {
-  return history.filter((order) => {
-    const completedAt = Date.parse(order.completedAt);
-    return Number.isFinite(completedAt) && completedAt >= from && completedAt < to;
-  });
 }

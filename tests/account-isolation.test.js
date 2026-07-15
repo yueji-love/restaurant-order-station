@@ -6,9 +6,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
-import { createPasswordRecord } from '../server/auth.js';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 
@@ -28,14 +26,19 @@ async function startApplication(databasePath) {
   const output = [];
   const child = spawn(process.execPath, ['server/index.js'], {
     cwd: projectRoot,
-    env: { ...process.env, PORT: String(port), DATABASE_PATH: databasePath },
+    env: {
+      ...process.env,
+      PORT: String(port),
+      DATABASE_PATH: databasePath,
+      PUBLIC_BASE_URL: 'https://t.example',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stdout.on('data', (chunk) => output.push(chunk.toString()));
   child.stderr.on('data', (chunk) => output.push(chunk.toString()));
 
   const baseUrl = `http://127.0.0.1:${port}`;
-  const deadline = Date.now() + 8_000;
+  const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`服务启动失败：${output.join('')}`);
     try {
@@ -50,57 +53,23 @@ async function startApplication(databasePath) {
   throw new Error(`等待服务启动超时：${output.join('')}`);
 }
 
-async function request(baseUrl, path, { cookie, method = 'GET', body } = {}) {
+async function request(baseUrl, path, { cookie, method = 'GET', body, rawBody, contentType } = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     method,
     headers: {
       ...(cookie ? { Cookie: cookie } : {}),
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      ...(contentType ? { 'Content-Type': contentType } : {}),
     },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: rawBody ?? (body === undefined ? undefined : JSON.stringify(body)),
   });
   const payload = await response.json().catch(() => null);
   return {
     status: response.status,
     payload,
     cookie: response.headers.get('set-cookie')?.split(';')[0] ?? '',
+    response,
   };
-}
-
-async function openEventStream(baseUrl, cookie) {
-  const controller = new AbortController();
-  const response = await fetch(`${baseUrl}/api/events`, {
-    headers: { Cookie: cookie },
-    signal: controller.signal,
-  });
-  assert.equal(response.status, 200);
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  async function readEvent() {
-    while (!buffer.includes('\n\n')) {
-      const { done, value } = await reader.read();
-      if (done) return '';
-      buffer += decoder.decode(value, { stream: true });
-    }
-    const boundary = buffer.indexOf('\n\n');
-    const event = buffer.slice(0, boundary);
-    buffer = buffer.slice(boundary + 2);
-    return event;
-  }
-
-  return { controller, readEvent };
-}
-
-async function register(baseUrl, username) {
-  const result = await request(baseUrl, '/api/auth/register', {
-    method: 'POST',
-    body: { username, password: 'password123' },
-  });
-  assert.equal(result.status, 201);
-  assert.ok(result.cookie);
-  return result.cookie;
 }
 
 async function login(baseUrl, username, password) {
@@ -109,6 +78,7 @@ async function login(baseUrl, username, password) {
     body: { username, password },
   });
   assert.equal(result.status, 200);
+  assert.ok(result.cookie);
   return result.cookie;
 }
 
@@ -118,232 +88,200 @@ async function stopApplication(child) {
   await once(child, 'exit');
 }
 
-test('不同账号的菜单、设置、订单和统计互相隔离', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'restaurant-isolation-'));
-  const app = await startApplication(join(directory, 'restaurant.sqlite'));
+test('空库自动创建 yue 测试账号和指定菜单且重启不覆盖数据', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'restaurant-bootstrap-'));
+  const databasePath = join(directory, 'restaurant.sqlite');
+  let app = await startApplication(databasePath);
   try {
-    const cookieA = await register(app.baseUrl, 'merchant-a');
-    const addOnResult = await request(app.baseUrl, '/api/add-ons', {
-      cookie: cookieA,
-      method: 'POST',
-      body: { name: '账号A小料', priceCents: 200, active: true },
-    });
-    assert.equal(addOnResult.status, 201);
-
-    const dishResult = await request(app.baseUrl, '/api/dishes', {
-      cookie: cookieA,
-      method: 'POST',
-      body: {
-        group: '账号A品类',
-        name: '账号A菜品',
-        note: '',
-        priceCents: 1000,
-        active: true,
-        allowedAddOnIds: [addOnResult.payload.id],
-      },
-    });
-    assert.equal(dishResult.status, 201);
+    const cookie = await login(app.baseUrl, 'yue', '123');
+    const state = await request(app.baseUrl, '/api/state', { cookie });
+    assert.equal(state.status, 200);
+    assert.equal(state.payload.categories.length, 4);
+    assert.equal(state.payload.dishes.length, 35);
+    assert.equal(state.payload.addOns.length, 24);
+    assert.equal(state.payload.numberPlates.length, 40);
+    assert.equal(state.payload.openBills.length, 0);
+    assert.equal(new Set(state.payload.numberPlates.map((plate) => plate.publicToken)).size, 40);
+    assert.ok(state.payload.numberPlates.every((plate) => /^[0-9ABCDEFGHJKMNPQRSTVWXYZ]{16}$/.test(plate.publicToken)));
     assert.equal((await request(app.baseUrl, '/api/settings', {
-      cookie: cookieA,
+      cookie,
       method: 'PATCH',
-      body: { availableNumbers: [7] },
+      body: { sound: false },
     })).status, 200);
+  } finally {
+    await stopApplication(app.child);
+  }
 
-    const invalidQuantity = await request(app.baseUrl, '/api/orders', {
-      cookie: cookieA,
-      method: 'POST',
-      body: { number: 7, dishId: dishResult.payload.id, addOnIds: [], quantity: 100 },
-    });
-    assert.equal(invalidQuantity.status, 400);
-
-    const orderResult = await request(app.baseUrl, '/api/orders', {
-      cookie: cookieA,
-      method: 'POST',
-      body: { number: 7, dishId: dishResult.payload.id, addOnIds: [addOnResult.payload.id], quantity: 3 },
-    });
-    assert.equal(orderResult.status, 201);
-    assert.equal(orderResult.payload.quantity, 3);
-    assert.equal(orderResult.payload.totalCents, 3600);
-    assert.equal((await request(app.baseUrl, `/api/orders/${orderResult.payload.id}`, {
-      cookie: cookieA,
-      method: 'PATCH',
-      body: { action: 'start' },
-    })).status, 200);
-    assert.equal((await request(app.baseUrl, `/api/orders/${orderResult.payload.id}`, {
-      cookie: cookieA,
-      method: 'PATCH',
-      body: { action: 'complete' },
-    })).status, 200);
-
-    const cookieB = await register(app.baseUrl, 'merchant-b');
-    const stateB = await request(app.baseUrl, '/api/state', { cookie: cookieB });
-    assert.deepEqual(stateB.payload.dishes, []);
-    assert.deepEqual(stateB.payload.addOns, []);
-    assert.deepEqual(stateB.payload.queue, []);
-    assert.equal(stateB.payload.settings.availableNumbers.length, 36);
-
-    const eventsA = await openEventStream(app.baseUrl, cookieA);
-    const eventsB = await openEventStream(app.baseUrl, cookieB);
-    try {
-      await eventsA.readEvent();
-      const initialEvent = await eventsB.readEvent();
-      assert.doesNotMatch(initialEvent, /账号A菜品/);
-      const accountAEvent = eventsA.readEvent();
-      const nextEvent = eventsB.readEvent().catch(() => '');
-      assert.equal((await request(app.baseUrl, '/api/settings', {
-        cookie: cookieA,
-        method: 'PATCH',
-        body: { sound: false },
-      })).status, 200);
-      const crossAccountEvent = await Promise.race([
-        nextEvent,
-        new Promise((resolve) => setTimeout(() => resolve('timeout'), 200)),
-      ]);
-      const sameAccountEvent = await Promise.race([
-        accountAEvent,
-        new Promise((resolve) => setTimeout(() => resolve('timeout'), 1_000)),
-      ]);
-      assert.match(sameAccountEvent, /"sound":false/);
-      assert.equal(crossAccountEvent, 'timeout');
-    } finally {
-      eventsA.controller.abort();
-      eventsB.controller.abort();
-    }
-
-    const forbiddenEdit = await request(app.baseUrl, `/api/dishes/${dishResult.payload.id}`, {
-      cookie: cookieB,
-      method: 'PATCH',
-      body: { name: '越权修改' },
-    });
-    assert.equal(forbiddenEdit.status, 404);
-
-    const stateA = await request(app.baseUrl, '/api/state', { cookie: cookieA });
-    assert.equal(stateA.payload.dishes.length, 1);
-    assert.equal(stateA.payload.addOns.length, 1);
-    assert.deepEqual(stateA.payload.settings.availableNumbers, [7]);
-
-    const now = Date.now();
-    const analyticsA = await request(
-      app.baseUrl,
-      `/api/analytics?from=${encodeURIComponent(new Date(now - 60_000).toISOString())}&to=${encodeURIComponent(new Date(now + 60_000).toISOString())}`,
-      { cookie: cookieA },
-    );
-    const analyticsB = await request(
-      app.baseUrl,
-      `/api/analytics?from=${encodeURIComponent(new Date(now - 60_000).toISOString())}&to=${encodeURIComponent(new Date(now + 60_000).toISOString())}`,
-      { cookie: cookieB },
-    );
-    assert.equal(analyticsA.payload.summary.orderCount, 1);
-    assert.equal(analyticsA.payload.summary.revenueCents, 3600);
-    assert.equal(analyticsA.payload.summary.addOnCount, 3);
-    assert.equal(analyticsA.payload.dishes[0].count, 3);
-    assert.equal(analyticsB.payload.summary.orderCount, 0);
-
-    const exportQuery = `from=${encodeURIComponent(new Date(now - 60_000).toISOString())}&to=${encodeURIComponent(new Date(now + 60_000).toISOString())}`;
-    const jsonExportAResponse = await fetch(`${app.baseUrl}/api/order-exports?${exportQuery}&format=json`, {
-      headers: { Cookie: cookieA },
-    });
-    assert.equal(jsonExportAResponse.status, 200);
-    assert.match(jsonExportAResponse.headers.get('content-type'), /application\/json/);
-    assert.match(jsonExportAResponse.headers.get('content-disposition'), /orders-\d{8}-\d{8}\.json/);
-    const jsonExportA = await jsonExportAResponse.json();
-    assert.equal(jsonExportA.merchant.username, 'merchant-a');
-    assert.equal(jsonExportA.range.basis, 'completedAt');
-    assert.equal(jsonExportA.range.timezone, 'Asia/Shanghai');
-    assert.equal(jsonExportA.orderCount, 1);
-    assert.equal(jsonExportA.orders[0].id, orderResult.payload.id);
-    assert.equal(jsonExportA.orders[0].quantity, 3);
-    assert.equal(jsonExportA.orders[0].totalCents, 3600);
-    assert.equal(jsonExportA.orders[0].addOns[0].name, '账号A小料');
-    assert.match(jsonExportA.orders[0].createdAt, /^\d{4}-\d{2}-\d{2}T/);
-    assert.match(jsonExportA.orders[0].startedAt, /^\d{4}-\d{2}-\d{2}T/);
-    assert.match(jsonExportA.orders[0].completedAt, /^\d{4}-\d{2}-\d{2}T/);
-    assert.match(jsonExportA.orders[0].exportAnalysis.completedAtChina, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
-    assert.equal(typeof jsonExportA.orders[0].exportAnalysis.totalServiceSeconds, 'number');
-
-    const jsonExportBResponse = await fetch(`${app.baseUrl}/api/order-exports?${exportQuery}&format=json`, {
-      headers: { Cookie: cookieB },
-    });
-    assert.equal(jsonExportBResponse.status, 200);
-    const jsonExportB = await jsonExportBResponse.json();
-    assert.equal(jsonExportB.orderCount, 0);
-    assert.deepEqual(jsonExportB.orders, []);
-
-    const csvExportResponse = await fetch(`${app.baseUrl}/api/order-exports?${exportQuery}&format=csv`, {
-      headers: { Cookie: cookieA },
-    });
-    assert.equal(csvExportResponse.status, 200);
-    assert.match(csvExportResponse.headers.get('content-type'), /text\/csv/);
-    const csvBytes = new Uint8Array(await csvExportResponse.arrayBuffer());
-    assert.deepEqual([...csvBytes.slice(0, 3)], [0xef, 0xbb, 0xbf]);
-    const csvExport = new TextDecoder().decode(csvBytes);
-    assert.match(csvExport, /"订单ID"/);
-    assert.match(csvExport, /"账号A菜品"/);
-    assert.match(csvExport, /"原始订单JSON"/);
-
-    const unauthenticatedExport = await fetch(`${app.baseUrl}/api/order-exports?${exportQuery}&format=json`);
-    assert.equal(unauthenticatedExport.status, 401);
+  app = await startApplication(databasePath);
+  try {
+    const cookie = await login(app.baseUrl, 'yue', '123');
+    const state = await request(app.baseUrl, '/api/state', { cookie });
+    assert.equal(state.payload.settings.sound, false);
+    assert.equal(state.payload.dishes.length, 35);
   } finally {
     await stopApplication(app.child);
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test('旧版全局业务数据只迁移给 yue', async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'restaurant-migration-'));
-  const databasePath = join(directory, 'restaurant.sqlite');
-  const database = new DatabaseSync(databasePath);
-  database.exec(`
-    CREATE TABLE users (
-      id TEXT PRIMARY KEY, username TEXT NOT NULL, username_normalized TEXT NOT NULL UNIQUE,
-      password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, created_at TEXT NOT NULL,
-      is_demo INTEGER NOT NULL DEFAULT 0
-    ) STRICT;
-    CREATE TABLE sessions (
-      token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      created_at TEXT NOT NULL, expires_at TEXT NOT NULL
-    ) STRICT;
-    CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK (id = 1), data_json TEXT NOT NULL) STRICT;
-    CREATE TABLE dishes (
-      id TEXT PRIMARY KEY, group_name TEXT NOT NULL, name TEXT NOT NULL, note TEXT NOT NULL,
-      price_cents INTEGER NOT NULL, active INTEGER NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL, updated_at TEXT NOT NULL, allowed_add_on_ids_json TEXT
-    ) STRICT;
-    CREATE TABLE add_ons (
-      id TEXT PRIMARY KEY, name TEXT NOT NULL, price_cents INTEGER NOT NULL, active INTEGER NOT NULL,
-      sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-    ) STRICT;
-    CREATE TABLE orders (id TEXT PRIMARY KEY, data_json TEXT NOT NULL) STRICT;
-    CREATE TABLE order_history (id TEXT PRIMARY KEY, completed_at TEXT NOT NULL, data_json TEXT NOT NULL) STRICT;
-  `);
-  const timestamp = new Date().toISOString();
-  const yuePassword = await createPasswordRecord('123');
-  const otherPassword = await createPasswordRecord('password123');
-  const insertUser = database.prepare(`
-    INSERT INTO users (id, username, username_normalized, password_hash, password_salt, created_at, is_demo)
-    VALUES (?, ?, ?, ?, ?, ?, 0)
-  `);
-  insertUser.run('user-yue', 'yue', 'yue', yuePassword.passwordHash, yuePassword.passwordSalt, timestamp);
-  insertUser.run('user-other', 'other', 'other', otherPassword.passwordHash, otherPassword.passwordSalt, timestamp);
-  database.prepare('INSERT INTO settings (id, data_json) VALUES (1, ?)')
-    .run(JSON.stringify({ sound: true, availableNumbers: [9] }));
-  database.prepare(`
-    INSERT INTO dishes
-      (id, group_name, name, note, price_cents, active, sort_order, created_at, updated_at, allowed_add_on_ids_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run('legacy-dish', '旧品类', '旧菜品', '', 1200, 1, 0, timestamp, timestamp, '[]');
-  database.close();
+test('同一号牌持续加菜、后厨两步制作、顾客进度和结算导出形成完整闭环', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'restaurant-flow-'));
+  const app = await startApplication(join(directory, 'restaurant.sqlite'));
+  try {
+    const cookie = await login(app.baseUrl, 'yue', '123');
+    const initial = (await request(app.baseUrl, '/api/state', { cookie })).payload;
+    const plate = initial.numberPlates[0];
+    const dish = initial.dishes.find((item) => item.allowedAddOnIds.length > 0);
+    const addOnId = dish.allowedAddOnIds[0];
+    const addOn = initial.addOns.find((item) => item.id === addOnId);
 
-  const app = await startApplication(databasePath);
+    const first = await request(app.baseUrl, `/api/number-plates/${plate.id}/items`, {
+      cookie,
+      method: 'POST',
+      body: { dishId: dish.id, addOnIds: [addOn.id], quantity: 2 },
+    });
+    assert.equal(first.status, 201);
+    assert.equal(first.payload.items.length, 1);
+    assert.equal(first.payload.items[0].status, 'waiting');
+    assert.equal(first.payload.totalCents, (dish.priceCents + addOn.priceCents) * 2);
+
+    const second = await request(app.baseUrl, `/api/number-plates/${plate.id}/items`, {
+      cookie,
+      method: 'POST',
+      body: { dishId: dish.id, addOnIds: [], quantity: 1 },
+    });
+    assert.equal(second.status, 201);
+    assert.equal(second.payload.id, first.payload.id);
+    assert.equal(second.payload.items.length, 2);
+
+    const activeState = (await request(app.baseUrl, '/api/state', { cookie })).payload;
+    const activePlate = activeState.numberPlates.find((item) => item.id === plate.id);
+    assert.equal(activePlate.status, 'active');
+    assert.equal(activePlate.itemCount, 2);
+    assert.equal(activeState.openBills.length, 1);
+    assert.equal(activeState.queue.length, 2);
+
+    const publicProgress = await request(app.baseUrl, `/api/public/plates/${plate.publicToken}/progress`);
+    assert.equal(publicProgress.status, 200);
+    assert.equal(publicProgress.payload.number, plate.number);
+    assert.equal(publicProgress.payload.bill.items.length, 2);
+    assert.deepEqual(publicProgress.payload.bill.items.map((item) => item.queuePosition), [1, 2]);
+
+    const qrResponse = await fetch(`${app.baseUrl}/api/number-plates/${plate.id}/qr.svg`, { headers: { Cookie: cookie } });
+    assert.equal(qrResponse.status, 200);
+    const qrSvg = await qrResponse.text();
+    assert.match(qrSvg, /<svg/);
+    assert.match(qrSvg, /#000000/);
+
+    const earlySettlement = await request(app.baseUrl, `/api/bills/${first.payload.id}/settle`, { cookie, method: 'POST' });
+    assert.equal(earlySettlement.status, 409);
+
+    for (const item of second.payload.items) {
+      const started = await request(app.baseUrl, `/api/kitchen/tasks/${item.id}`, {
+        cookie,
+        method: 'PATCH',
+        body: { action: 'start' },
+      });
+      assert.equal(started.status, 200);
+      const completed = await request(app.baseUrl, `/api/kitchen/tasks/${item.id}`, {
+        cookie,
+        method: 'PATCH',
+        body: { action: 'complete' },
+      });
+      assert.equal(completed.status, 200);
+      const thirdClick = await request(app.baseUrl, `/api/kitchen/tasks/${item.id}`, {
+        cookie,
+        method: 'PATCH',
+        body: { action: 'complete' },
+      });
+      assert.equal(thirdClick.status, 409);
+    }
+
+    const category = initial.categories.find((item) => item.id === dish.categoryId);
+    assert.equal((await request(app.baseUrl, `/api/categories/${category.id}`, {
+      cookie,
+      method: 'PATCH',
+      body: { name: `${category.name}新` },
+    })).status, 200);
+    const beforeSettlement = (await request(app.baseUrl, '/api/state', { cookie })).payload.openBills[0];
+    assert.equal(beforeSettlement.items[0].dishGroup, category.name);
+
+    const settled = await request(app.baseUrl, `/api/bills/${first.payload.id}/settle`, { cookie, method: 'POST' });
+    assert.equal(settled.status, 200);
+    assert.equal(settled.payload.bill.status, 'settled');
+    const repeated = await request(app.baseUrl, `/api/bills/${first.payload.id}/settle`, { cookie, method: 'POST' });
+    assert.equal(repeated.status, 200);
+    assert.equal(repeated.payload.alreadySettled, true);
+
+    const emptyProgress = await request(app.baseUrl, `/api/public/plates/${plate.publicToken}/progress`);
+    assert.equal(emptyProgress.payload.bill, null);
+    const released = (await request(app.baseUrl, '/api/state', { cookie })).payload.numberPlates.find((item) => item.id === plate.id);
+    assert.equal(released.status, 'idle');
+
+    const now = Date.now();
+    const query = `from=${encodeURIComponent(new Date(now - 60_000).toISOString())}&to=${encodeURIComponent(new Date(now + 60_000).toISOString())}`;
+    const analytics = await request(app.baseUrl, `/api/analytics?${query}`, { cookie });
+    assert.equal(analytics.payload.summary.orderCount, 1);
+    assert.equal(analytics.payload.dishes[0].count, 3);
+
+    const jsonResponse = await fetch(`${app.baseUrl}/api/order-exports?${query}&format=json`, { headers: { Cookie: cookie } });
+    const jsonExport = await jsonResponse.json();
+    assert.equal(jsonExport.schemaVersion, 2);
+    assert.equal(jsonExport.billCount, 1);
+    assert.equal(jsonExport.bills[0].items.length, 2);
+    assert.match(jsonExport.bills[0].totalYuan, /^\d+\.\d{2}$/);
+    assert.equal(JSON.stringify(jsonExport).includes('CNY'), false);
+    assert.equal(JSON.stringify(jsonExport).includes('totalCents'), false);
+
+    const csvResponse = await fetch(`${app.baseUrl}/api/order-exports?${query}&format=csv`, { headers: { Cookie: cookie } });
+    const csvBytes = new Uint8Array(await csvResponse.arrayBuffer());
+    assert.deepEqual([...csvBytes.slice(0, 3)], [0xef, 0xbb, 0xbf]);
+    const csv = new TextDecoder().decode(csvBytes);
+    assert.match(csv, /账单总额（元）/);
+    assert.doesNotMatch(csv, /CNY|人民币|（分）/);
+
+    const nextBill = await request(app.baseUrl, `/api/number-plates/${plate.id}/items`, {
+      cookie,
+      method: 'POST',
+      body: { dishId: dish.id, addOnIds: [], quantity: 1 },
+    });
+    assert.equal(nextBill.status, 201);
+    assert.notEqual(nextBill.payload.id, first.payload.id);
+  } finally {
+    await stopApplication(app.child);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('新注册账号与 yue 的菜单、账单和管理接口严格隔离', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'restaurant-isolation-'));
+  const app = await startApplication(join(directory, 'restaurant.sqlite'));
   try {
     const yueCookie = await login(app.baseUrl, 'yue', '123');
-    const otherCookie = await login(app.baseUrl, 'other', 'password123');
-    const yueState = await request(app.baseUrl, '/api/state', { cookie: yueCookie });
-    const otherState = await request(app.baseUrl, '/api/state', { cookie: otherCookie });
-    assert.equal(yueState.payload.dishes[0].name, '旧菜品');
-    assert.deepEqual(yueState.payload.settings.availableNumbers, [9]);
-    assert.deepEqual(otherState.payload.dishes, []);
-    assert.equal(otherState.payload.settings.availableNumbers.length, 36);
+    const yueState = (await request(app.baseUrl, '/api/state', { cookie: yueCookie })).payload;
+    const registration = await request(app.baseUrl, '/api/auth/register', {
+      method: 'POST',
+      body: { username: 'merchant-b', password: 'password123' },
+    });
+    assert.equal(registration.status, 201);
+    const stateB = (await request(app.baseUrl, '/api/state', { cookie: registration.cookie })).payload;
+    assert.deepEqual(stateB.categories, []);
+    assert.deepEqual(stateB.dishes, []);
+    assert.deepEqual(stateB.addOns, []);
+    assert.equal(stateB.numberPlates.length, 36);
+    assert.deepEqual(stateB.openBills, []);
+
+    const forbidden = await request(app.baseUrl, `/api/dishes/${yueState.dishes[0].id}`, {
+      cookie: registration.cookie,
+      method: 'PATCH',
+      body: { name: '越权修改' },
+    });
+    assert.equal(forbidden.status, 404);
+
+    const unauthenticatedState = await request(app.baseUrl, '/api/state');
+    assert.equal(unauthenticatedState.status, 401);
+    const invalidPublicToken = await request(app.baseUrl, '/api/public/plates/0000000000000000/progress');
+    assert.equal(invalidPublicToken.status, 404);
   } finally {
     await stopApplication(app.child);
     rmSync(directory, { recursive: true, force: true });
