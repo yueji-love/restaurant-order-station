@@ -537,21 +537,37 @@ app.delete('/api/settings/payment-qr', (request, response) => {
   return response.json({ ok: true });
 });
 
+function addPlateNumberToQr(svg, number) {
+  const viewBox = svg.match(/viewBox="0 0 ([\d.]+) ([\d.]+)"/);
+  if (!viewBox) return svg;
+  const size = Number(viewBox[1]);
+  const label = String(number).padStart(2, '0');
+  const badgeWidth = size * (label.length > 2 ? 0.25 : 0.21);
+  const badgeHeight = size * 0.17;
+  const badgeX = (size - badgeWidth) / 2;
+  const badgeY = (size - badgeHeight) / 2;
+  const fontSize = size * (label.length > 2 ? 0.075 : 0.095);
+  const marker = `<g aria-label="${label}号"><rect x="${badgeX}" y="${badgeY}" width="${badgeWidth}" height="${badgeHeight}" rx="${size * 0.025}" fill="#FFFFFF"/><text x="${size / 2}" y="${size / 2}" text-anchor="middle" dominant-baseline="central" font-family="Arial, sans-serif" font-size="${fontSize}" font-weight="800" fill="#202020">${label}</text></g>`;
+  return svg.replace('</svg>', `${marker}</svg>`);
+}
+
 app.get('/api/number-plates/:id/qr.svg', asyncHandler(async (request, response) => {
   const plate = database.prepare('SELECT * FROM number_plates WHERE id = ? AND user_id = ?').get(request.params.id, request.authUser.id);
   if (!plate) return response.status(404).json({ message: '号牌不存在。' });
   const configuredBase = process.env.PUBLIC_BASE_URL?.trim().replace(/\/$/, '');
   const fallbackBase = `${request.protocol}://${request.get('host')}`;
   const target = `${configuredBase || fallbackBase}/Q/${plate.public_token}`.toUpperCase();
-  const svg = await QRCode.toString(target, {
+  const baseSvg = await QRCode.toString(target, {
     type: 'svg',
-    errorCorrectionLevel: 'M',
+    errorCorrectionLevel: 'H',
     margin: 4,
     color: { dark: '#000000', light: '#FFFFFFFF' },
   });
+  const svg = addPlateNumberToQr(baseSvg, plate.number);
+  const disposition = request.query.download === '1' ? 'attachment' : 'inline';
   response.set({
     'Content-Type': 'image/svg+xml; charset=utf-8',
-    'Content-Disposition': `attachment; filename="number-plate-${plate.number}.svg"`,
+    'Content-Disposition': `${disposition}; filename="number-plate-${plate.number}.svg"`,
     'Cache-Control': 'private, no-store',
   });
   return response.send(svg);

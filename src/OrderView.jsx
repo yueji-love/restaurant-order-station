@@ -54,7 +54,12 @@ export default function OrderView({ state, run }) {
   }
   async function submitCart() {
     const result = await run(() => addBillItems(plateId, cart.map(({ dishId, addOnIds, quantity }) => ({ dishId, addOnIds, quantity }))), `已提交 ${cartQuantity} 份菜品`);
-    if (result) { setCart([]); setCartOpen(false); }
+    if (result) {
+      setCart([]);
+      setCartOpen(false);
+      setPlateId('');
+      setCategoryId('');
+    }
   }
   function leavePlate() {
     if (cart.length) setCartOpen(true);

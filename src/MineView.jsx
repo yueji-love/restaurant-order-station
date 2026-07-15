@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  ArrowDown, ArrowUp, ChartBar, DownloadSimple, ForkKnife, Gear, PencilSimple, Plus, QrCode, Storefront, Trash, UploadSimple,
+  ArrowDown, ArrowUp, ChartBar, DownloadSimple, Eye, ForkKnife, Gear, PencilSimple, Plus, QrCode, Storefront, Trash, UploadSimple,
 } from '@phosphor-icons/react';
 import {
   createAddOn, createCategory, createDish, deleteAddOn, deleteDish, deletePaymentQr, downloadOrderExport, getAnalytics,
@@ -82,14 +82,33 @@ function AddOnPanel({ state, run }) {
 
 function SettingsPanel({ state, run }) {
   const [numbers, setNumbers] = useState(state.settings.availableNumbers.join('、'));
+  const [rangeOpen, setRangeOpen] = useState(false);
+  const [rangeEnd, setRangeEnd] = useState(40);
+  const [previewPlate, setPreviewPlate] = useState(null);
   useEffect(() => setNumbers(state.settings.availableNumbers.join('、')), [state.settings.availableNumbers]);
   const parsedNumbers = [...new Set(numbers.split(/[^0-9]+/).map(Number).filter((item) => Number.isInteger(item) && item > 0 && item <= 999))].sort((a, b) => a - b);
+  function openRangeDrawer() {
+    setRangeEnd(Math.max(1, ...state.settings.availableNumbers));
+    setRangeOpen(true);
+  }
+  async function saveRange(event) {
+    event.preventDefault();
+    const end = Math.max(1, Math.min(999, Number(rangeEnd) || 1));
+    const nextNumbers = Array.from({ length: end }, (_, index) => index + 1);
+    const ok = await run(() => saveSettings({ availableNumbers: nextNumbers }), `已生成 1 到 ${end} 号牌`);
+    if (ok) {
+      setNumbers(nextNumbers.join('、'));
+      setRangeOpen(false);
+    }
+  }
   async function upload(event) { const file = event.target.files?.[0]; if (file) await run(() => uploadPaymentQr(file), '收款码已更新'); event.target.value = ''; }
   return <section className="mine-panel settings-panel">
     <div className="settings-row"><div><h2>三全音提示</h2><p>有新菜品任务时播放提示音。</p></div><button className={`toggle ${state.settings.sound ? 'active' : ''}`} onClick={() => run(() => saveSettings({ sound: !state.settings.sound }), '设置已保存')}><i />{state.settings.sound ? '已开启' : '已关闭'}</button></div>
-    <div className="settings-block"><header><div><h2>可用号牌</h2><p>支持不连续号码；有未结算账单的号牌不能移除。</p></div><strong>{state.numberPlates.length}<small>张</small></strong></header><textarea value={numbers} onChange={(event) => setNumbers(event.target.value)} placeholder="例如：1、2、3、8、12" /><button className="dark-button" disabled={!parsedNumbers.length} onClick={() => run(() => saveSettings({ availableNumbers: parsedNumbers }), '号牌已更新')}>保存号牌</button></div>
-    <div className="settings-block"><header><div><h2>号牌二维码</h2><p>打印后贴在号牌背面；二维码长期有效。</p></div><QrCode size={30} /></header><div className="qr-download-grid">{state.numberPlates.map((plate) => <a key={plate.id} href={`/api/number-plates/${plate.id}/qr.svg`} download><QrCode /><span>{String(plate.number).padStart(2, '0')} 号</span><DownloadSimple /></a>)}</div></div>
+    <div className="settings-block"><header><div><h2>可用号牌</h2><p>支持不连续号码；有未结算账单的号牌不能移除。</p></div><div className="settings-block-actions"><strong>{state.numberPlates.length}<small>张</small></strong><button className="light-button" onClick={openRangeDrawer}><Plus />连续生成</button></div></header><textarea value={numbers} onChange={(event) => setNumbers(event.target.value)} placeholder="例如：1、2、3、8、12" /><button className="dark-button" disabled={!parsedNumbers.length} onClick={() => run(() => saveSettings({ availableNumbers: parsedNumbers }), '号牌已更新')}>保存号牌</button></div>
+    <div className="settings-block"><header><div><h2>号牌二维码</h2><p>点击号牌预览；二维码长期有效。</p></div><QrCode size={30} /></header><div className="qr-download-grid">{state.numberPlates.map((plate) => <button key={plate.id} onClick={() => setPreviewPlate(plate)}><QrCode /><span>{String(plate.number).padStart(2, '0')} 号</span><Eye /></button>)}</div></div>
     <div className="settings-block"><header><div><h2>商家收款码</h2><p>顾客扫码查看进度时显示在页面底部。</p></div>{state.settings.paymentQrConfigured && <StatusPill active />}</header>{state.settings.paymentQrConfigured && <img className="payment-preview" src="/api/settings/payment-qr" alt="当前收款码" />}<div className="payment-actions"><label className="dark-button"><UploadSimple />{state.settings.paymentQrConfigured ? '更换收款码' : '上传收款码'}<input type="file" accept="image/png,image/jpeg,image/webp" onChange={upload} hidden /></label>{state.settings.paymentQrConfigured && <button className="light-button" onClick={() => run(deletePaymentQr, '收款码已移除')}><Trash />移除</button>}</div></div>
+    {rangeOpen && <Drawer title="连续生成号牌" onClose={() => setRangeOpen(false)}><form className="range-drawer-form" onSubmit={saveRange}><label>结束号码<input autoFocus required type="number" min="1" max="999" value={rangeEnd} onChange={(event) => setRangeEnd(event.target.value)} /></label><div className="range-preview"><span>将生成</span><strong>1 到 {Math.max(1, Math.min(999, Number(rangeEnd) || 1))}</strong><small>当前号牌清单会被替换。有未结算账单的号牌不能移除。</small></div><button className="primary-button">生成号牌</button></form></Drawer>}
+    {previewPlate && <Drawer title={`${String(previewPlate.number).padStart(2, '0')} 号二维码`} onClose={() => setPreviewPlate(null)}><div className="qr-preview"><img src={`/api/number-plates/${previewPlate.id}/qr.svg`} alt={`${String(previewPlate.number).padStart(2, '0')}号二维码预览`} /><p>二维码中央已标记 {String(previewPlate.number).padStart(2, '0')} 号</p></div><footer className="drawer-footer"><a className="dark-button" href={`/api/number-plates/${previewPlate.id}/qr.svg?download=1`} download><DownloadSimple />下载二维码</a></footer></Drawer>}
   </section>;
 }
 

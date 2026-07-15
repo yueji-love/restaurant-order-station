@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  ArrowRight, Check, ClipboardText, CookingPot, QrCode, Receipt, SignOut, UserCircle,
+  ArrowRight, Check, CheckCircle, ClipboardText, CookingPot, QrCode, Receipt, SignOut, UserCircle, WarningCircle,
 } from '@phosphor-icons/react';
 import {
   getCurrentUser, getPublicProgress, getState, loginUser, logoutUser, registerUser, subscribeToPublicProgress, subscribeToState,
@@ -110,6 +110,6 @@ export default function App() {
   return <div className="app-shell">
     <header className="topbar"><div className="topbar__brand">点单台</div><nav>{nav.map(({ id, label, icon: Icon }) => <button key={id} className={view === id ? 'active' : ''} onClick={() => setView(id)}><Icon weight={view === id ? 'fill' : 'regular'} />{label}{id === 'kitchen' && state.queue.length > 0 && <i>{state.queue.length}</i>}</button>)}</nav><div className="topbar__account"><span><UserCircle />{user.username}</span><button onClick={signOut} aria-label="退出登录"><SignOut /></button></div></header>
     {view === 'order' && <OrderView state={state} run={run} />}{view === 'kitchen' && <KitchenView state={state} run={run} />}{view === 'checkout' && <CheckoutView state={state} run={run} />}{view === 'mine' && <MineView state={state} run={run} />}
-    {(toast || error) && <div className={`toast ${error ? 'error' : ''}`}>{error || toast}</div>}
+    {(toast || error) && <div key={error || toast} className={`toast ${error ? 'error' : ''}`} role={error ? 'alert' : 'status'} aria-live="polite">{error ? <WarningCircle weight="fill" /> : <CheckCircle weight="fill" />}<span>{error || toast}</span></div>}
   </div>;
 }
