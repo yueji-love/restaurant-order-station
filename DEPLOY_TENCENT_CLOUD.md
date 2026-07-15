@@ -38,7 +38,7 @@ data/restaurant.sqlite
 | SSH 用户名 | 常见为 `ubuntu` 或 `root` | 登录服务器 |
 | 域名（可稍后准备） | `order.example.com` | 正式 HTTPS 访问 |
 | SSL 证书（可稍后准备） | `.crt/.pem` 和 `.key` | 启用 HTTPS |
-| 是否导入本机数据库 | 是 / 否 | 保留现有账号、菜单和历史数据 |
+| 对外访问地址 | `https://order.example.com` | 生成号牌二维码中的网址 |
 
 在腾讯云控制台的服务器安全组中，只开放：
 
@@ -48,7 +48,7 @@ data/restaurant.sqlite
 
 不要开放 `5175` 端口。
 
-> 当前系统开放所有人注册，但每个账号的菜单、设置、订单和经营数据相互隔离。同一商家的多台设备必须登录同一个账号才能实时协作。正式公开营业前仍建议增加邀请码或管理员审核，不要把弱密码测试账号用于生产环境。
+> 当前系统开放所有人注册，但每个账号的菜单、设置、账单和经营数据相互隔离。同一商家的多台设备必须登录同一个账号才能实时协作。固定账号 `yue / 123` 用于演示，正式营业请另外注册强密码账号。
 
 ## 三、连接服务器
 
@@ -138,41 +138,32 @@ sudo apt update
 sudo apt install -y git
 ```
 
-## 六、选择数据库方案
+## 六、数据库初始化规则
 
-### 方案 A：全新开始
+全新部署时不要上传本机测试数据库。程序发现数据库为空，会在第一次启动时自动建立：
 
-不需要做任何数据库操作，直接进入下一节。程序首次启动时会自动创建数据库，然后可以注册新账号、录入菜单。
+- 固定测试账号 `yue / 123`
+- 4 个菜品大类、35 个菜品、24 个小料和 40 张号牌
+- 空账单、空经营历史
 
-### 方案 B：导入你电脑上的现有数据（推荐给当前项目）
+这套初始化逻辑包含在生产程序中，腾讯云和本地行为一致。数据库已有账号后，重启、更新 Docker 或重新构建镜像都不会再次导入，也不会覆盖现有数据。
 
-现有数据库包含账号、密码哈希、菜单、订单和历史数据。它不会上传到公开 Git 仓库，需要单独传到服务器。
-
-先在服务器执行以下命令，确保程序未运行：
-
-```bash
-cd /opt/restaurant-order-station
-docker compose down
-```
-
-然后在你自己的 Windows PowerShell 中执行：
-
-```powershell
-scp "C:\Users\Administrator\Desktop\点餐\server\data\restaurant.sqlite" ubuntu@服务器公网IP:/tmp/restaurant.sqlite
-```
-
-上传成功后，再回到服务器的 SSH 窗口执行：
-
-```bash
-sudo install -o 1000 -g 1000 -m 600 /tmp/restaurant.sqlite /opt/restaurant-order-station/data/restaurant.sqlite
-rm -f /tmp/restaurant.sqlite
-```
-
-不要把 `restaurant.sqlite` 提交到 Gitee 或 GitHub，它包含真实业务数据。
+当前版本不迁移早期测试结构。如果服务器的 `data/restaurant.sqlite` 来自旧版，容器会明确提示需要重建。项目尚未正式上线时，可以先把旧文件备份到项目目录外，再按“十二、显式重建测试数据库”操作。不要把任何 `.sqlite` 文件提交到 Gitee 或 GitHub。
 
 ## 七、构建并启动程序
 
-在服务器执行：
+如果已经有正式 HTTPS 域名，先把它写入 `.env`。这个地址会写进号牌二维码，因此应在打印二维码前配置正确：
+
+```bash
+cd /opt/restaurant-order-station
+cat > .env <<'EOF'
+PUBLIC_BASE_URL=https://你的域名
+EOF
+```
+
+没有域名、只想临时测试时，可以暂时不创建 `.env`。此时二维码会使用浏览器访问当前页面时的地址；正式打印前仍应配置固定 HTTPS 域名并重新下载二维码。
+
+然后构建并启动：
 
 ```bash
 cd /opt/restaurant-order-station
@@ -280,9 +271,12 @@ HTTPS 生效后，Chrome 或 Edge 才能在非本机设备上正常安装 PWA。
 
 - [ ] `docker compose ps` 显示应用为 `healthy`
 - [ ] 浏览器能打开登录页
-- [ ] 如果导入了旧数据库，原账号能登录，菜单数据存在
-- [ ] A 设备下单后，B 设备的出餐页能及时出现订单
-- [ ] 开始制作、完成取餐功能正常
+- [ ] `yue / 123` 能登录，测试菜单存在
+- [ ] 同一号牌可以多次加菜，总金额正确累计
+- [ ] A 设备加菜后，B 设备的出餐页能及时出现独立菜品任务
+- [ ] 后厨只有开始制作、完成制作两次操作
+- [ ] 全部菜品完成后可以结算，结算后号牌恢复空闲
+- [ ] 顾客扫描号牌二维码能看到本号牌当前进度和金额
 - [ ] Chrome/Edge 可以安装到桌面，打开后没有普通地址栏
 - [ ] 腾讯云安全组没有开放 `5175`
 
@@ -296,7 +290,7 @@ HTTPS 生效后，Chrome 或 Edge 才能在非本机设备上正常安装 PWA。
 /opt/restaurant-order-station/data/restaurant.sqlite
 ```
 
-`compose.yaml` 已把服务器的 `./data` 目录挂载到容器的 `/app/server/data`，所以正常执行 `docker compose build`、`up`、`down` 都不会删除数据库。不要手动删除 `data` 目录，也不要把数据库提交到 Git。
+`compose.yaml` 已把服务器的 `./data` 目录挂载到容器的 `/app/server/data`，所以正常执行 `docker compose build`、`up`、`down` 都不会删除数据库。不要使用 `docker compose down -v`，不要手动删除 `data` 目录，也不要把数据库提交到 Git。
 
 ### 第 1 步：进入项目并确认没有服务器本地改动
 
@@ -376,7 +370,7 @@ curl -fsS http://127.0.0.1:5175/api/auth/me
 - `docker compose ps` 中的应用最终显示 `healthy`
 - 日志没有反复重启或数据库报错
 - `curl` 返回 `{"user":null}`，表示接口可访问
-- 浏览器中原账号、菜单、订单和历史数据仍然存在
+- 浏览器中原账号、菜单、未结算账单和历史数据仍然存在
 
 PWA 可能短时间显示旧界面。关闭桌面应用后重新打开，或在浏览器中强制刷新一次，让 Service Worker 获取新资源。
 
@@ -390,7 +384,30 @@ docker image prune -f
 
 带有 `restaurant-order-station:rollback` 标签的回滚镜像不会被这条命令删除。
 
-## 十二、下载备份、恢复与回滚
+## 十二、显式重建测试数据库
+
+只有在确认要清空全部账号、菜单、账单和经营历史时才执行。本操作会重新生成唯一的 `yue / 123` 和默认测试菜单。
+
+先备份，再停止应用：
+
+```bash
+cd /opt/restaurant-order-station
+sudo mkdir -p /opt/restaurant-order-station-backups
+sudo cp data/restaurant.sqlite "/opt/restaurant-order-station-backups/before-reset-$(date +%F-%H%M%S).sqlite"
+docker compose stop app
+```
+
+然后执行带有明确确认参数的重建命令：
+
+```bash
+docker compose run --rm app npm run db:reset-demo -- --confirm-reset
+docker compose up -d
+docker compose ps
+```
+
+缺少 `--confirm-reset` 时程序会拒绝清空。生产营业数据不应使用此命令。
+
+## 十三、下载备份、恢复与回滚
 
 ### 把数据库备份下载到自己的 Windows 电脑
 
@@ -448,9 +465,7 @@ docker compose logs --tail=100 app
 
 回滚成功后先不要再次构建镜像。保留错误日志和执行过的命令，再修复新版本问题。
 
-从旧版首次更新到账号隔离版本时，程序会自动迁移数据库：原有菜单、设置、订单和历史数据归属 `yue`；其他账号会得到各自独立的空工作台。不要在迁移过程中降级或同时运行两个版本。
-
-## 十三、常见问题
+## 十四、常见问题
 
 ### 1. 页面显示 502 Bad Gateway
 
@@ -499,7 +514,18 @@ docker compose logs --tail=200 app
 
 再确认线上使用的是项目自带的 `deploy/nginx.conf.example`，其中已经关闭实时连接的代理缓冲。
 
-## 十四、最常用排查命令
+### 6. 二维码打开了错误地址
+
+检查部署目录中的 `.env`：
+
+```bash
+cd /opt/restaurant-order-station
+cat .env
+```
+
+应看到 `PUBLIC_BASE_URL=https://你的域名`。修改后执行 `docker compose up -d --force-recreate`，再从“我的 → 工作台设置”重新下载号牌二维码。已经打印的二维码不会自动改变。
+
+## 十五、最常用排查命令
 
 ```bash
 cd /opt/restaurant-order-station

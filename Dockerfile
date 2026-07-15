@@ -25,6 +25,7 @@ RUN npm ci --omit=dev --ignore-scripts --registry=${NPM_REGISTRY} \
 
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node server ./server
+COPY --chown=node:node scripts ./scripts
 RUN mkdir -p /app/server/data && chown -R node:node /app/server/data
 
 USER node

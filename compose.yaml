@@ -12,6 +12,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5175
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
     ports:
       - "127.0.0.1:${APP_PORT:-5175}:5175"
     volumes:
