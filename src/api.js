@@ -11,33 +11,55 @@ async function request(path, options) {
   return response.json();
 }
 
-export function getCurrentUser() {
-  return request('/api/auth/me');
+function jsonRequest(path, method, body) {
+  return request(path, { method, headers: JSON_HEADERS, body: JSON.stringify(body) });
 }
 
-export function registerUser(credentials) {
-  return request('/api/auth/register', {
+export const getCurrentUser = () => request('/api/auth/me');
+export const registerUser = (body) => jsonRequest('/api/auth/register', 'POST', body);
+export const loginUser = (body) => jsonRequest('/api/auth/login', 'POST', body);
+export const logoutUser = () => request('/api/auth/logout', { method: 'POST' });
+export const getState = () => request('/api/state');
+
+export function subscribeToState({ onState, onOpen, onError }) {
+  const events = new EventSource('/api/events');
+  events.addEventListener('state', (event) => onState(JSON.parse(event.data)));
+  events.addEventListener('open', onOpen);
+  events.addEventListener('error', onError);
+  return () => events.close();
+}
+
+export const addBillItem = (numberPlateId, body) => jsonRequest(`/api/number-plates/${encodeURIComponent(numberPlateId)}/items`, 'POST', body);
+export const updateKitchenTask = (id, action) => jsonRequest(`/api/kitchen/tasks/${encodeURIComponent(id)}`, 'PATCH', { action });
+export const updateKitchenBatch = (sourceDishId, action) => jsonRequest('/api/kitchen/tasks/batch', 'PATCH', { sourceDishId, action });
+export const settleBill = (id) => jsonRequest(`/api/bills/${encodeURIComponent(id)}/settle`, 'POST', {});
+export const getBills = (status, limit = 100) => request(`/api/bills?status=${encodeURIComponent(status)}&limit=${limit}`);
+
+export const createCategory = (body) => jsonRequest('/api/categories', 'POST', body);
+export const updateCategory = (id, body) => jsonRequest(`/api/categories/${encodeURIComponent(id)}`, 'PATCH', body);
+export const reorderCategories = (ids) => jsonRequest('/api/categories/order', 'PUT', { ids });
+
+export const createDish = (body) => jsonRequest('/api/dishes', 'POST', body);
+export const updateDish = (id, body) => jsonRequest(`/api/dishes/${encodeURIComponent(id)}`, 'PATCH', body);
+export const deleteDish = (id) => request(`/api/dishes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export const reorderDishes = (ids) => jsonRequest('/api/dishes/order', 'PUT', { ids });
+
+export const createAddOn = (body) => jsonRequest('/api/add-ons', 'POST', body);
+export const updateAddOn = (id, body) => jsonRequest(`/api/add-ons/${encodeURIComponent(id)}`, 'PATCH', body);
+export const deleteAddOn = (id) => request(`/api/add-ons/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export const reorderAddOns = (ids) => jsonRequest('/api/add-ons/order', 'PUT', { ids });
+
+export const saveSettings = (body) => jsonRequest('/api/settings', 'PATCH', body);
+
+export async function uploadPaymentQr(file) {
+  return request('/api/settings/payment-qr', {
     method: 'POST',
-    headers: JSON_HEADERS,
-    body: JSON.stringify(credentials),
+    headers: { 'Content-Type': file.type },
+    body: file,
   });
 }
 
-export function loginUser(credentials) {
-  return request('/api/auth/login', {
-    method: 'POST',
-    headers: JSON_HEADERS,
-    body: JSON.stringify(credentials),
-  });
-}
-
-export function logoutUser() {
-  return request('/api/auth/logout', { method: 'POST' });
-}
-
-export function getState() {
-  return request('/api/state');
-}
+export const deletePaymentQr = () => request('/api/settings/payment-qr', { method: 'DELETE' });
 
 export function getAnalytics({ from, to }) {
   const query = new URLSearchParams({ from, to });
@@ -58,98 +80,11 @@ export async function downloadOrderExport({ from, to, format }) {
   return { filename, blob: await response.blob() };
 }
 
-export function createOrder(order) {
-  return request('/api/orders', {
-    method: 'POST',
-    headers: JSON_HEADERS,
-    body: JSON.stringify(order),
-  });
-}
+export const getPublicProgress = (token) => request(`/api/public/plates/${encodeURIComponent(token)}/progress`);
 
-export function updateOrder(id, action) {
-  return request(`/api/orders/${encodeURIComponent(id)}`, {
-    method: 'PATCH',
-    headers: JSON_HEADERS,
-    body: JSON.stringify({ action }),
-  });
-}
-
-export function updateOrdersBatch(category, action) {
-  return request('/api/orders/batch', {
-    method: 'PATCH',
-    headers: JSON_HEADERS,
-    body: JSON.stringify({ category, action }),
-  });
-}
-
-export function saveSettings(settings) {
-  return request('/api/settings', {
-    method: 'PATCH',
-    headers: JSON_HEADERS,
-    body: JSON.stringify(settings),
-  });
-}
-
-export function createDish(dish) {
-  return request('/api/dishes', {
-    method: 'POST',
-    headers: JSON_HEADERS,
-    body: JSON.stringify(dish),
-  });
-}
-
-export function updateDish(id, patch) {
-  return request(`/api/dishes/${encodeURIComponent(id)}`, {
-    method: 'PATCH',
-    headers: JSON_HEADERS,
-    body: JSON.stringify(patch),
-  });
-}
-
-export function deleteDish(id) {
-  return request(`/api/dishes/${encodeURIComponent(id)}`, { method: 'DELETE' });
-}
-
-export function reorderDishes(ids) {
-  return request('/api/dishes/order', {
-    method: 'PUT',
-    headers: JSON_HEADERS,
-    body: JSON.stringify({ ids }),
-  });
-}
-
-export function createAddOn(addOn) {
-  return request('/api/add-ons', {
-    method: 'POST',
-    headers: JSON_HEADERS,
-    body: JSON.stringify(addOn),
-  });
-}
-
-export function updateAddOn(id, patch) {
-  return request(`/api/add-ons/${encodeURIComponent(id)}`, {
-    method: 'PATCH',
-    headers: JSON_HEADERS,
-    body: JSON.stringify(patch),
-  });
-}
-
-export function deleteAddOn(id) {
-  return request(`/api/add-ons/${encodeURIComponent(id)}`, { method: 'DELETE' });
-}
-
-export function reorderAddOns(ids) {
-  return request('/api/add-ons/order', {
-    method: 'PUT',
-    headers: JSON_HEADERS,
-    body: JSON.stringify({ ids }),
-  });
-}
-
-export function subscribeToState({ onState, onOpen, onError }) {
-  const events = new EventSource('/api/events');
-  events.addEventListener('state', (event) => onState(JSON.parse(event.data)));
-  events.addEventListener('open', onOpen);
+export function subscribeToPublicProgress(token, { onChange, onError }) {
+  const events = new EventSource(`/api/public/plates/${encodeURIComponent(token)}/events`);
+  events.addEventListener('changed', onChange);
   events.addEventListener('error', onError);
   return () => events.close();
 }
