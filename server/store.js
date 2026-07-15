@@ -452,13 +452,13 @@ export class RestaurantStore {
     }
     const bill = mapBill(billRow, this.itemsForBills([billRow.id]).get(billRow.id) ?? []);
     const items = bill.items.map((item) => {
-      if (item.status !== 'waiting') return { ...item, queuePosition: null, aheadCount: null };
+      if (item.status !== 'waiting') return { ...item, aheadCount: null };
       const aheadCount = Number(this.database.prepare(`
-        SELECT COUNT(*) AS count FROM bill_items
-        WHERE user_id = ? AND source_dish_id = ? AND status = 'waiting'
+        SELECT COALESCE(SUM(quantity), 0) AS count FROM bill_items
+        WHERE user_id = ? AND status = 'waiting'
           AND (created_at < ? OR (created_at = ? AND id < ?))
-      `).get(plate.user_id, item.sourceDishId, item.createdAt, item.createdAt, item.id).count);
-      return { ...item, queuePosition: aheadCount + 1, aheadCount };
+      `).get(plate.user_id, item.createdAt, item.createdAt, item.id).count);
+      return { ...item, aheadCount };
     });
     return {
       numberPlateId: plate.id,

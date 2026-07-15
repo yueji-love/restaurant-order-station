@@ -9,7 +9,7 @@ import CheckoutView from './CheckoutView.jsx';
 import KitchenView from './KitchenView.jsx';
 import MineView from './MineView.jsx';
 import OrderView from './OrderView.jsx';
-import { money, StatusPill } from './ui.jsx';
+import { dateTime, money, StatusPill } from './ui.jsx';
 
 const EMPTY_STATE = {
   categories: [], dishes: [], addOns: [], numberPlates: [], openBills: [], queue: [],
@@ -69,9 +69,18 @@ function PublicProgress({ token }) {
   if (error) return <main className="public-page public-empty"><QrCode size={55} /><h1>{error}</h1></main>;
   if (!progress) return <main className="public-page public-empty"><span className="loader" />正在读取号牌…</main>;
   const bill = progress.bill;
+  const timeline = (item) => [
+    { label: '下单', value: item.createdAt },
+    { label: '开始制作', value: item.startedAt },
+    { label: '完成', value: item.completedAt },
+  ];
   return <main className="public-page">
     <header><div><span>号牌</span><strong>{String(progress.number).padStart(2, '0')}<small>号</small></strong></div>{bill && <section><small>当前消费</small><strong>{money(bill.totalCents, true)}</strong></section>}</header>
-    {!bill ? <section className="public-no-bill"><Check size={52} /><h1>当前没有未结算账单</h1><p>下单后，这里会自动显示制作进度。</p></section> : <><section className="public-summary"><div><strong>{bill.totalQuantity}</strong><span>总份数</span></div><div><strong>{bill.completedCount}</strong><span>已完成</span></div><div><strong>{bill.incompleteCount}</strong><span>未完成</span></div></section><section className="public-items">{bill.items.map((item) => <article key={item.id}><div><StatusPill status={item.status} />{item.status === 'waiting' && <span className="queue-position">{item.queuePosition}</span>}</div><section><h2>{item.dishName} <small>× {item.quantity}</small></h2><p>{item.extras.join('、') || '不加小料'}</p>{item.status === 'waiting' && <em>同菜前面还有 {item.aheadCount} 份任务</em>}</section><strong>{money(item.totalCents)}</strong></article>)}</section></>}
+    {!bill ? <section className="public-no-bill"><Check size={52} /><h1>当前没有未结算账单</h1><p>下单后，这里会自动显示制作进度。</p></section> : <><section className="public-summary"><div><strong>{bill.totalQuantity}</strong><span>总份数</span></div><div><strong>{bill.completedCount}</strong><span>已完成</span></div><div><strong>{bill.incompleteCount}</strong><span>未完成</span></div></section><section className="public-items">{bill.items.map((item) => <article key={item.id}>
+      <header className="public-item-head"><StatusPill status={item.status} /><section><h2>{item.dishName} <small>× {item.quantity}</small></h2><p>{item.extras.join('、') || '不加小料'}</p></section><strong>{money(item.totalCents)}</strong></header>
+      {item.status === 'waiting' && <p className="queue-ahead">{item.aheadCount > 0 ? `前面还有 ${item.aheadCount} 份待制作` : '已排到最前'}</p>}
+      <div className={`item-timeline timeline-${item.status}`} aria-label={`${item.dishName}制作进度`}>{timeline(item).map((event) => <div key={event.label} className={`timeline-event ${event.value ? 'reached' : ''}`}><i aria-hidden="true" /><span>{event.label}</span>{event.value ? <time dateTime={event.value}>{dateTime(event.value)}</time> : <small>等待中</small>}</div>)}</div>
+    </article>)}</section></>}
     {progress.paymentQrConfigured && <footer className="public-payment"><span>扫码付款</span><img src={`/api/public/plates/${token}/payment-qr`} alt="商家收款码" /><p>请向商家确认结算金额</p></footer>}
   </main>;
 }
