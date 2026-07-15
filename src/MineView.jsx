@@ -6,7 +6,7 @@ import {
   createAddOn, createCategory, createDish, deleteAddOn, deleteDish, deletePaymentQr, downloadOrderExport, getAnalytics,
   reorderAddOns, reorderCategories, reorderDishes, saveSettings, updateAddOn, updateCategory, updateDish, uploadPaymentQr,
 } from './api.js';
-import { Modal, money, moveItem, saveBlob, StatusPill } from './ui.jsx';
+import { Drawer, money, moveItem, saveBlob, StatusPill } from './ui.jsx';
 
 function AnalyticsPanel() {
   const [days, setDays] = useState(7);
@@ -39,28 +39,30 @@ function DishForm({ initial, state, onSave, onClose }) {
   </form>;
 }
 
+function CategoryForm({ initial, onSave, onClose }) {
+  const [name, setName] = useState(initial?.name || '');
+  async function submit(event) {
+    event.preventDefault();
+    const ok = await onSave({ name });
+    if (ok) onClose();
+  }
+  return <form className="editor-form category-drawer-form" onSubmit={submit}><label>品类名称<input autoFocus required maxLength="30" value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：锡纸系列" /></label><button className="primary-button">{initial ? '保存品类' : '添加品类'}</button></form>;
+}
+
 function MenuPanel({ state, run }) {
   const [editing, setEditing] = useState(null);
-  const [categoryName, setCategoryName] = useState('');
-  const [editingCategory, setEditingCategory] = useState(null);
+  const [categoryEditor, setCategoryEditor] = useState(null);
   const grouped = state.categories.map((category) => ({ category, dishes: state.dishes.filter((dish) => dish.categoryId === category.id) }));
   async function reorderDish(index, offset) { return run(() => reorderDishes(moveItem(state.dishes, index, offset).map((item) => item.id)), '菜品顺序已更新'); }
   async function reorderCategory(index, offset) { return run(() => reorderCategories(moveItem(state.categories, index, offset).map((item) => item.id)), '品类顺序已更新'); }
-  async function saveCategory(event) {
-    event.preventDefault();
-    const ok = editingCategory
-      ? await run(() => updateCategory(editingCategory.id, { name: categoryName }), '品类已更新')
-      : await run(() => createCategory({ name: categoryName }), '品类已添加');
-    if (ok) { setCategoryName(''); setEditingCategory(null); }
-  }
   return <section className="mine-panel management-panel">
-    <div className="panel-toolbar"><h1>菜品管理</h1><button className="dark-button" onClick={() => setEditing({ type: 'create' })}><Plus />新增菜品</button></div>
-    <form className="category-editor" onSubmit={saveCategory}><input placeholder="新增品类" value={categoryName} onChange={(event) => setCategoryName(event.target.value)} required /><button>{editingCategory ? '保存名称' : '添加品类'}</button>{editingCategory && <button type="button" onClick={() => { setEditingCategory(null); setCategoryName(''); }}>取消</button>}</form>
+    <div className="panel-toolbar"><h1>菜品管理</h1><div className="panel-actions"><button className="light-button" onClick={() => setCategoryEditor({ type: 'create' })}><Plus />新增品类</button><button className="dark-button" onClick={() => setEditing({ type: 'create' })}><Plus />新增菜品</button></div></div>
     <div className="category-list">{grouped.map(({ category, dishes }, categoryIndex) => <section key={category.id}>
-      <header><div><h2>{category.name}</h2><span>{dishes.length} 个菜品</span></div><div className="row-actions"><button aria-label={`${category.name} 上移`} disabled={!categoryIndex} onClick={() => reorderCategory(categoryIndex, -1)}><ArrowUp /></button><button aria-label={`${category.name} 下移`} disabled={categoryIndex === grouped.length - 1} onClick={() => reorderCategory(categoryIndex, 1)}><ArrowDown /></button><button aria-label={`编辑品类 ${category.name}`} onClick={() => { setEditingCategory(category); setCategoryName(category.name); }}><PencilSimple /></button></div></header>
+      <header><div><h2>{category.name}</h2><span>{dishes.length} 个菜品</span></div><div className="row-actions"><button aria-label={`${category.name} 上移`} disabled={!categoryIndex} onClick={() => reorderCategory(categoryIndex, -1)}><ArrowUp /></button><button aria-label={`${category.name} 下移`} disabled={categoryIndex === grouped.length - 1} onClick={() => reorderCategory(categoryIndex, 1)}><ArrowDown /></button><button aria-label={`编辑品类 ${category.name}`} onClick={() => setCategoryEditor({ type: 'edit', item: category })}><PencilSimple /></button></div></header>
       <div className="management-rows">{dishes.map((dish) => { const index = state.dishes.findIndex((item) => item.id === dish.id); return <div key={dish.id}><section><strong>{dish.name}</strong><small>{dish.note || '无说明'} · {dish.allowedAddOnIds.length} 种可选小料</small></section><b>{money(dish.priceCents)}</b><StatusPill active={dish.active} /><div className="row-actions"><button aria-label={`${dish.name} 上移`} disabled={!index} onClick={() => reorderDish(index, -1)}><ArrowUp /></button><button aria-label={`${dish.name} 下移`} disabled={index === state.dishes.length - 1} onClick={() => reorderDish(index, 1)}><ArrowDown /></button><button aria-label={`编辑菜品 ${dish.name}`} onClick={() => setEditing({ type: 'edit', item: dish })}><PencilSimple /></button><button aria-label={`删除菜品 ${dish.name}`} onClick={() => run(() => deleteDish(dish.id), '菜品已删除')}><Trash /></button></div></div>; })}</div>
     </section>)}</div>
-    {editing && <Modal title={editing.type === 'create' ? '新增菜品' : '编辑菜品'} onClose={() => setEditing(null)}><DishForm initial={editing.item} state={state} onClose={() => setEditing(null)} onSave={(body) => run(() => editing.type === 'create' ? createDish(body) : updateDish(editing.item.id, body), '菜品已保存')} /></Modal>}
+    {editing && <Drawer title={editing.type === 'create' ? '新增菜品' : '编辑菜品'} onClose={() => setEditing(null)} wide><DishForm initial={editing.item} state={state} onClose={() => setEditing(null)} onSave={(body) => run(() => editing.type === 'create' ? createDish(body) : updateDish(editing.item.id, body), '菜品已保存')} /></Drawer>}
+    {categoryEditor && <Drawer title={categoryEditor.type === 'create' ? '新增品类' : '编辑品类'} onClose={() => setCategoryEditor(null)}><CategoryForm initial={categoryEditor.item} onClose={() => setCategoryEditor(null)} onSave={(body) => run(() => categoryEditor.type === 'create' ? createCategory(body) : updateCategory(categoryEditor.item.id, body), categoryEditor.type === 'create' ? '品类已添加' : '品类已更新')} /></Drawer>}
   </section>;
 }
 
@@ -75,7 +77,7 @@ function AddOnForm({ initial, onSave, onClose }) {
 function AddOnPanel({ state, run }) {
   const [editing, setEditing] = useState(null);
   async function reorder(index, offset) { return run(() => reorderAddOns(moveItem(state.addOns, index, offset).map((item) => item.id)), '小料顺序已更新'); }
-  return <section className="mine-panel management-panel"><div className="panel-toolbar"><h1>小料库</h1><button className="dark-button" onClick={() => setEditing({ type: 'create' })}><Plus />新增小料</button></div><div className="management-rows standalone">{state.addOns.map((item, index) => <div key={item.id}><section><strong>{item.name}</strong><small>{item.active ? '点菜时可选' : '已停用'}</small></section><b>{money(item.priceCents)}</b><div className="row-actions"><button aria-label={`${item.name} 上移`} disabled={!index} onClick={() => reorder(index, -1)}><ArrowUp /></button><button aria-label={`${item.name} 下移`} disabled={index === state.addOns.length - 1} onClick={() => reorder(index, 1)}><ArrowDown /></button><button aria-label={`编辑小料 ${item.name}`} onClick={() => setEditing({ type: 'edit', item })}><PencilSimple /></button><button aria-label={`删除小料 ${item.name}`} onClick={() => run(() => deleteAddOn(item.id), '小料已删除')}><Trash /></button></div></div>)}</div>{editing && <Modal title={editing.type === 'create' ? '新增小料' : '编辑小料'} onClose={() => setEditing(null)}><AddOnForm initial={editing.item} onClose={() => setEditing(null)} onSave={(body) => run(() => editing.type === 'create' ? createAddOn(body) : updateAddOn(editing.item.id, body), '小料已保存')} /></Modal>}</section>;
+  return <section className="mine-panel management-panel"><div className="panel-toolbar"><h1>小料库</h1><button className="dark-button" onClick={() => setEditing({ type: 'create' })}><Plus />新增小料</button></div><div className="management-rows standalone">{state.addOns.map((item, index) => <div key={item.id}><section><strong>{item.name}</strong><small>{item.active ? '点菜时可选' : '已停用'}</small></section><b>{money(item.priceCents)}</b><div className="row-actions"><button aria-label={`${item.name} 上移`} disabled={!index} onClick={() => reorder(index, -1)}><ArrowUp /></button><button aria-label={`${item.name} 下移`} disabled={index === state.addOns.length - 1} onClick={() => reorder(index, 1)}><ArrowDown /></button><button aria-label={`编辑小料 ${item.name}`} onClick={() => setEditing({ type: 'edit', item })}><PencilSimple /></button><button aria-label={`删除小料 ${item.name}`} onClick={() => run(() => deleteAddOn(item.id), '小料已删除')}><Trash /></button></div></div>)}</div>{editing && <Drawer title={editing.type === 'create' ? '新增小料' : '编辑小料'} onClose={() => setEditing(null)}><AddOnForm initial={editing.item} onClose={() => setEditing(null)} onSave={(body) => run(() => editing.type === 'create' ? createAddOn(body) : updateAddOn(editing.item.id, body), '小料已保存')} /></Drawer>}</section>;
 }
 
 function SettingsPanel({ state, run }) {

@@ -9,7 +9,7 @@ export function money(cents = 0, fixed = false) {
 export function dateTime(value) {
   return value ? new Intl.DateTimeFormat('zh-CN', {
     month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  }).format(new Date(value)) : '—';
+  }).format(new Date(value)) : '-';
 }
 
 export function waitMinutes(value) {
@@ -48,6 +48,26 @@ export function Modal({ title, onClose, children }) {
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className="modal" role="dialog" aria-modal="true" aria-label={title}>
+        <header><h2>{title}</h2><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={22} /></button></header>
+        {children}
+      </section>
+    </div>
+  );
+}
+
+export function Drawer({ title, onClose, children, wide = false }) {
+  useEffect(() => {
+    const close = (event) => event.key === 'Escape' && onClose();
+    window.addEventListener('keydown', close);
+    document.body.classList.add('drawer-open');
+    return () => {
+      window.removeEventListener('keydown', close);
+      document.body.classList.remove('drawer-open');
+    };
+  }, [onClose]);
+  return (
+    <div className="drawer-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className={`drawer ${wide ? 'drawer-wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}>
         <header><h2>{title}</h2><button className="icon-button" onClick={onClose} aria-label="关闭"><X size={22} /></button></header>
         {children}
       </section>

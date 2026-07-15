@@ -568,6 +568,23 @@ app.post('/api/number-plates/:id/items', (request, response) => {
   return response.status(201).json(store.bill(request.authUser.id, created.billId));
 });
 
+app.post('/api/number-plates/:id/items/batch', (request, response) => {
+  const items = request.body?.items;
+  const valid = Array.isArray(items) && items.length >= 1 && items.length <= 50 && items.every((item) => (
+    typeof item?.dishId === 'string'
+    && Array.isArray(item.addOnIds)
+    && item.addOnIds.every((id) => typeof id === 'string')
+    && Number.isInteger(item.quantity)
+    && item.quantity >= 1
+    && item.quantity <= 99
+  ));
+  if (!valid) return response.status(400).json({ message: '点菜单无效，请检查菜品、小料和份数。' });
+  const created = store.createBillItems(request.authUser.id, { numberPlateId: request.params.id, items });
+  broadcastStaff(request.authUser.id);
+  broadcastPlate(created.numberPlateId);
+  return response.status(201).json(store.bill(request.authUser.id, created.billId));
+});
+
 app.post('/api/orders', (request, response) => {
   const { number, dishId, addOnIds = [], quantity = 1 } = request.body ?? {};
   const plate = Number.isInteger(number) ? database.prepare(`

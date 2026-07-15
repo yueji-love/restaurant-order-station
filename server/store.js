@@ -296,33 +296,13 @@ export class RestaurantStore {
     };
   }
 
-  createBillItem(userId, { numberPlateId, dishId, addOnIds, quantity }) {
-    const timestamp = new Date().toISOString();
+  createBillItems(userId, { numberPlateId, items }) {
     return withTransaction(this.database, () => {
       const plate = this.database.prepare(`
         SELECT * FROM number_plates WHERE id = ? AND user_id = ?
       `).get(numberPlateId, userId);
       if (!plate) throw Object.assign(new Error('号牌不存在或未启用。'), { status: 404 });
-
-      const dish = this.database.prepare(`
-        SELECT d.*, c.name AS category_name FROM dishes d
-        JOIN categories c ON c.id = d.category_id
-        WHERE d.id = ? AND d.user_id = ? AND d.active = 1
-      `).get(dishId, userId);
-      if (!dish) throw Object.assign(new Error('该菜品已停用或删除，请重新选择。'), { status: 409 });
-
-      const uniqueAddOnIds = [...new Set(addOnIds)];
-      const selectedAddOns = uniqueAddOnIds.length ? this.database.prepare(`
-        SELECT a.* FROM add_ons a
-        JOIN dish_add_ons da ON da.add_on_id = a.id
-        WHERE da.dish_id = ? AND a.user_id = ? AND a.active = 1
-          AND a.id IN (${placeholders(uniqueAddOnIds)})
-        ORDER BY da.sort_order, a.id
-      `).all(dishId, userId, ...uniqueAddOnIds) : [];
-      if (selectedAddOns.length !== uniqueAddOnIds.length) {
-        throw Object.assign(new Error('部分小料不可用于该菜品，请重新选择。'), { status: 409 });
-      }
-
+      const openedAt = new Date().toISOString();
       let bill = this.database.prepare(`
         SELECT * FROM bills WHERE user_id = ? AND number_plate_id = ? AND status = 'open'
       `).get(userId, numberPlateId);
@@ -331,45 +311,66 @@ export class RestaurantStore {
         this.database.prepare(`
           INSERT INTO bills (id, user_id, number_plate_id, number_snapshot, status, total_cents, opened_at)
           VALUES (?, ?, ?, ?, 'open', 0, ?)
-        `).run(billId, userId, numberPlateId, plate.number, timestamp);
+        `).run(billId, userId, numberPlateId, plate.number, openedAt);
         bill = this.database.prepare('SELECT * FROM bills WHERE id = ?').get(billId);
       }
-
-      const addOnUnitCents = selectedAddOns.reduce((sum, item) => sum + item.price_cents, 0);
-      const unitTotalCents = dish.price_cents + addOnUnitCents;
-      const lineTotalCents = unitTotalCents * quantity;
-      const itemId = createId('item');
-      this.database.prepare(`
+      const insertItem = this.database.prepare(`
         INSERT INTO bill_items (
           id, bill_id, user_id, source_dish_id, category_name_snapshot, dish_name_snapshot,
           dish_note_snapshot, base_price_cents, add_on_unit_cents, unit_total_cents,
           quantity, line_total_cents, status, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?)
-      `).run(
-        itemId,
-        bill.id,
-        userId,
-        dish.id,
-        dish.category_name,
-        dish.name,
-        dish.note,
-        dish.price_cents,
-        addOnUnitCents,
-        unitTotalCents,
-        quantity,
-        lineTotalCents,
-        timestamp,
-      );
+      `);
       const insertSnapshot = this.database.prepare(`
         INSERT INTO bill_item_add_ons (id, bill_item_id, source_add_on_id, name_snapshot, price_cents, sort_order)
         VALUES (?, ?, ?, ?, ?, ?)
       `);
-      selectedAddOns.forEach((item, sortOrder) => {
-        insertSnapshot.run(createId('item-addon'), itemId, item.id, item.name, item.price_cents, sortOrder);
+      let addedTotalCents = 0;
+      const itemIds = [];
+      items.forEach(({ dishId, addOnIds, quantity }, itemIndex) => {
+        const dish = this.database.prepare(`
+          SELECT d.*, c.name AS category_name FROM dishes d
+          JOIN categories c ON c.id = d.category_id
+          WHERE d.id = ? AND d.user_id = ? AND d.active = 1
+        `).get(dishId, userId);
+        if (!dish) throw Object.assign(new Error('部分菜品已停用或删除，请重新选择。'), { status: 409 });
+        const uniqueAddOnIds = [...new Set(addOnIds)];
+        const selectedAddOns = uniqueAddOnIds.length ? this.database.prepare(`
+          SELECT a.* FROM add_ons a
+          JOIN dish_add_ons da ON da.add_on_id = a.id
+          WHERE da.dish_id = ? AND a.user_id = ? AND a.active = 1
+            AND a.id IN (${placeholders(uniqueAddOnIds)})
+          ORDER BY da.sort_order, a.id
+        `).all(dishId, userId, ...uniqueAddOnIds) : [];
+        if (selectedAddOns.length !== uniqueAddOnIds.length) {
+          throw Object.assign(new Error('部分小料不可用于所选菜品，请重新选择。'), { status: 409 });
+        }
+        const addOnUnitCents = selectedAddOns.reduce((sum, item) => sum + item.price_cents, 0);
+        const unitTotalCents = dish.price_cents + addOnUnitCents;
+        const lineTotalCents = unitTotalCents * quantity;
+        const itemId = createId('item');
+        const timestamp = new Date(Date.parse(openedAt) + itemIndex).toISOString();
+        insertItem.run(
+          itemId, bill.id, userId, dish.id, dish.category_name, dish.name, dish.note,
+          dish.price_cents, addOnUnitCents, unitTotalCents, quantity, lineTotalCents, timestamp,
+        );
+        selectedAddOns.forEach((item, sortOrder) => {
+          insertSnapshot.run(createId('item-addon'), itemId, item.id, item.name, item.price_cents, sortOrder);
+        });
+        itemIds.push(itemId);
+        addedTotalCents += lineTotalCents;
       });
-      this.database.prepare('UPDATE bills SET total_cents = total_cents + ? WHERE id = ?').run(lineTotalCents, bill.id);
-      return { billId: bill.id, itemId, numberPlateId };
+      this.database.prepare('UPDATE bills SET total_cents = total_cents + ? WHERE id = ?').run(addedTotalCents, bill.id);
+      return { billId: bill.id, itemIds, numberPlateId };
     });
+  }
+
+  createBillItem(userId, { numberPlateId, dishId, addOnIds, quantity }) {
+    const created = this.createBillItems(userId, {
+      numberPlateId,
+      items: [{ dishId, addOnIds, quantity }],
+    });
+    return { ...created, itemId: created.itemIds[0] };
   }
 
   updateTask(userId, taskId, action) {

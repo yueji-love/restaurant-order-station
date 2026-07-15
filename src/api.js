@@ -30,6 +30,7 @@ export function subscribeToState({ onState, onOpen, onError }) {
 }
 
 export const addBillItem = (numberPlateId, body) => jsonRequest(`/api/number-plates/${encodeURIComponent(numberPlateId)}/items`, 'POST', body);
+export const addBillItems = (numberPlateId, items) => jsonRequest(`/api/number-plates/${encodeURIComponent(numberPlateId)}/items/batch`, 'POST', { items });
 export const updateKitchenTask = (id, action) => jsonRequest(`/api/kitchen/tasks/${encodeURIComponent(id)}`, 'PATCH', { action });
 export const updateKitchenBatch = (sourceDishId, action) => jsonRequest('/api/kitchen/tasks/batch', 'PATCH', { sourceDishId, action });
 export const settleBill = (id) => jsonRequest(`/api/bills/${encodeURIComponent(id)}/settle`, 'POST', {});
