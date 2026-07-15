@@ -364,7 +364,8 @@ h1, h2, h3, p { margin: 0; }
 .public-items h2 { font-size: 17px; }
 .public-items h2 small { color: var(--muted); font-size: 13px; }
 .public-items p { margin-top: 5px; color: var(--muted); font-size: 13px; }
-.public-items .queue-ahead { margin: 14px 0 0 98px; color: var(--green); font-weight: 800; }
+.public-items .queue-order { margin: 14px 0 0 98px; color: var(--green); font-weight: 800; }
+.queue-order strong { font-size: 18px; font-variant-numeric: tabular-nums; }
 .item-timeline { position: relative; display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 20px; padding-top: 1px; }
 .item-timeline::before { content: ""; position: absolute; top: 7px; right: 16.67%; left: 16.67%; height: 2px; background: var(--line); }
 .item-timeline::after { content: ""; position: absolute; top: 7px; left: 16.67%; width: 0; height: 2px; background: var(--green); }
@@ -486,7 +487,7 @@ h1, h2, h3, p { margin: 0; }
   .auth-panel { padding: 36px 24px 60px; }
   .auth-tabs { margin-bottom: 30px; }
   .public-item-head { grid-template-columns: 72px 1fr auto; }
-  .public-items .queue-ahead { margin-left: 86px; }
+  .public-items .queue-order { margin-left: 86px; }
   .timeline-event time, .timeline-event small { max-width: 72px; }
   .form-row, .checkbox-grid { grid-template-columns: 1fr; }
 }
