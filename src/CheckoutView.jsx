@@ -27,7 +27,7 @@ export default function CheckoutView({ state, run }) {
         {selected ? <>
           <header><span>{String(selected.number).padStart(2, '0')}<small>号</small></span><div><small>账单合计</small><strong>{money(selected.totalCents)}</strong></div></header>
           <div className="checkout-lines">{selected.items.map((item) => <div key={item.id}><StatusPill status={item.status} /><section><strong>{item.dishName} × {item.quantity}</strong><small>{item.extras.join('、') || '不加小料'}</small></section><b>{money(item.totalCents)}</b></div>)}</div>
-          <footer><p>{selected.incompleteCount ? `还有 ${selected.incompleteCount} 道菜未完成` : '菜品已全部完成，可以结算'}</p><button className="primary-button" disabled={selected.incompleteCount > 0} onClick={settle}>确认结算 · {money(selected.totalCents)}</button></footer>
+          <footer><button className="primary-button" disabled={selected.incompleteCount > 0} onClick={settle}>确认结算 · {money(selected.totalCents)}</button></footer>
         </> : <div className="empty-page"><Receipt size={50} /><h2>选择一张账单</h2></div>}
       </aside>
     </main>
